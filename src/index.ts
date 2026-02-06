@@ -576,6 +576,13 @@ const DeleteGoogleSlideSchema = z.object({
   pageObjectId: z.string().min(1, "Page/Slide object ID to delete")
 });
 
+const ReplaceAllTextInSlidesSchema = z.object({
+  presentationId: z.string().min(1, "Presentation ID is required"),
+  findText: z.string().min(1, "Text to find is required"),
+  replaceText: z.string(),
+  matchCase: z.boolean().optional().default(false)
+});
+
 // -----------------------------------------------------------------------------
 // SERVER SETUP
 // -----------------------------------------------------------------------------
@@ -1451,6 +1458,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             pageObjectId: { type: "string", description: "Slide ID to delete (from getGoogleSlidesContent)" }
           },
           required: ["presentationId", "pageObjectId"]
+        }
+      },
+      {
+        name: "replaceAllTextInSlides",
+        description: "Replace all occurrences of text in a Google Slides presentation",
+        inputSchema: {
+          type: "object",
+          properties: {
+            presentationId: { type: "string", description: "Presentation ID" },
+            findText: { type: "string", description: "Text to find" },
+            replaceText: { type: "string", description: "Text to replace with (use empty string to delete)" },
+            matchCase: { type: "boolean", description: "Match case (default: false)" }
+          },
+          required: ["presentationId", "findText", "replaceText"]
         }
       }
     ]
@@ -3517,6 +3538,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{ 
             type: "text", 
             text: `Deleted slide: ${args.pageObjectId}`
+          }],
+          isError: false
+        };
+      }
+
+      case "replaceAllTextInSlides": {
+        const validation = ReplaceAllTextInSlidesSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const slidesService = google.slides({ version: 'v1', auth: authClient });
+        
+        const response = await slidesService.presentations.batchUpdate({
+          presentationId: args.presentationId,
+          requestBody: {
+            requests: [
+              {
+                replaceAllText: {
+                  containsText: {
+                    text: args.findText,
+                    matchCase: args.matchCase
+                  },
+                  replaceText: args.replaceText
+                }
+              }
+            ]
+          }
+        });
+
+        const occurrences = response.data.replies?.[0]?.replaceAllText?.occurrencesChanged || 0;
+
+        return {
+          content: [{ 
+            type: "text", 
+            text: `Replaced ${occurrences} occurrence(s) of "${args.findText}" with "${args.replaceText}"`
           }],
           isError: false
         };
