@@ -14,7 +14,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { authenticate, runAuthCommand, AuthServer, initializeOAuth2Client } from './auth.js';
 import { z } from 'zod';
 import { fileURLToPath } from 'url';
-import { readFileSync } from 'fs';
+import { readFileSync, createReadStream, existsSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 
 // Drive service - will be created with auth when needed
@@ -72,6 +72,23 @@ const TEXT_MIME_TYPES = {
   txt: 'text/plain',
   md: 'text/markdown'
 };
+
+// MIME types for binary file uploads (extension → MIME)
+const BINARY_MIME_TYPES: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
+  webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', ico: 'image/x-icon',
+  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
+  aac: 'audio/aac', flac: 'audio/flac', opus: 'audio/opus',
+  mp4: 'video/mp4', webm: 'video/webm', avi: 'video/x-msvideo', mov: 'video/quicktime',
+  mkv: 'video/x-matroska', '3gp': 'video/3gpp',
+  pdf: 'application/pdf', zip: 'application/zip', gz: 'application/gzip',
+  tar: 'application/x-tar', json: 'application/json', xml: 'application/xml',
+  csv: 'text/csv', html: 'text/html', css: 'text/css', js: 'application/javascript',
+  doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+};
+
 // Global auth client - will be initialized on first use
 let authClient: any = null;
 let authenticationPromise: Promise<any> | null = null;
@@ -316,13 +333,15 @@ const UpdateGoogleDocSchema = z.object({
 const CreateGoogleSheetSchema = z.object({
   name: z.string().min(1, "Sheet name is required"),
   data: z.array(z.array(z.string())),
-  parentFolderId: z.string().optional()
+  parentFolderId: z.string().optional(),
+  valueInputOption: z.enum(["RAW", "USER_ENTERED"]).optional()
 });
 
 const UpdateGoogleSheetSchema = z.object({
   spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
   range: z.string().min(1, "Range is required"),
-  data: z.array(z.array(z.string()))
+  data: z.array(z.array(z.string())),
+  valueInputOption: z.enum(["RAW", "USER_ENTERED"]).optional()
 });
 
 const GetGoogleSheetContentSchema = z.object({
@@ -550,6 +569,24 @@ const CreateGoogleSlidesShapeSchema = z.object({
     blue: z.number().min(0).max(1).optional(),
     alpha: z.number().min(0).max(1).optional()
   }).optional()
+});
+
+const GetGoogleSlidesSpeakerNotesSchema = z.object({
+  presentationId: z.string().min(1, "Presentation ID is required"),
+  slideIndex: z.number().min(0, "Slide index must be non-negative")
+});
+
+const UpdateGoogleSlidesSpeakerNotesSchema = z.object({
+  presentationId: z.string().min(1, "Presentation ID is required"),
+  slideIndex: z.number().min(0, "Slide index must be non-negative"),
+  notes: z.string()
+});
+
+const UploadFileSchema = z.object({
+  localPath: z.string().min(1, "Local file path is required"),
+  name: z.string().optional(),
+  parentFolderId: z.string().optional(),
+  mimeType: z.string().optional()
 });
 
 const InsertGoogleSlidesImageSchema = z.object({
@@ -877,7 +914,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "createGoogleSheet",
-        description: "Create a new Google Sheet",
+        description: "Create a new Google Sheet. By default uses RAW mode which stores values as-is. Set valueInputOption to 'USER_ENTERED' only when you need formulas to be evaluated.",
         inputSchema: {
           type: "object",
           properties: {
@@ -887,22 +924,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Data as array of arrays",
               items: { type: "array", items: { type: "string" } }
             },
-            parentFolderId: { type: "string", description: "Parent folder ID (defaults to root)", optional: true }
+            parentFolderId: { type: "string", description: "Parent folder ID (defaults to root)", optional: true },
+            valueInputOption: {
+              type: "string",
+              enum: ["RAW", "USER_ENTERED"],
+              description: "RAW (default): Values stored exactly as provided - formulas stored as text strings. Safe for untrusted data. USER_ENTERED: Values parsed like spreadsheet UI - formulas (=SUM, =IF, etc.) are evaluated. SECURITY WARNING: USER_ENTERED can execute formulas, only use with trusted data, never with user-provided input that could contain malicious formulas like =IMPORTDATA() or =IMPORTRANGE()."
+            }
           },
           required: ["name", "data"]
         }
       },
       {
         name: "updateGoogleSheet",
-        description: "Update an existing Google Sheet",
+        description: "Update an existing Google Sheet. By default uses RAW mode which stores values as-is. Set valueInputOption to 'USER_ENTERED' only when you need formulas to be evaluated.",
         inputSchema: {
           type: "object",
           properties: {
             spreadsheetId: { type: "string", description: "Sheet ID" },
-            range: { type: "string", description: "Range to update" },
+            range: { type: "string", description: "Range to update (e.g., 'Sheet1!A1:C10')" },
             data: {
               type: "array",
+              description: "2D array of values to write",
               items: { type: "array", items: { type: "string" } }
+            },
+            valueInputOption: {
+              type: "string",
+              enum: ["RAW", "USER_ENTERED"],
+              description: "RAW (default): Values stored exactly as provided - formulas stored as text strings. Safe for untrusted data. USER_ENTERED: Values parsed like spreadsheet UI - formulas (=SUM, =IF, etc.) are evaluated. SECURITY WARNING: USER_ENTERED can execute formulas, only use with trusted data, never with user-provided input that could contain malicious formulas like =IMPORTDATA() or =IMPORTRANGE()."
             }
           },
           required: ["spreadsheetId", "range", "data"]
@@ -1414,6 +1462,45 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "getGoogleSlidesSpeakerNotes",
+        description: "Get speaker notes from a specific slide in Google Slides",
+        inputSchema: {
+          type: "object",
+          properties: {
+            presentationId: { type: "string", description: "Presentation ID" },
+            slideIndex: { type: "number", description: "Slide index (0-based)" }
+          },
+          required: ["presentationId", "slideIndex"]
+        }
+      },
+      {
+        name: "updateGoogleSlidesSpeakerNotes",
+        description: "Update speaker notes for a specific slide in Google Slides",
+        inputSchema: {
+          type: "object",
+          properties: {
+            presentationId: { type: "string", description: "Presentation ID" },
+            slideIndex: { type: "number", description: "Slide index (0-based)" },
+            notes: { type: "string", description: "Speaker notes content" }
+          },
+          required: ["presentationId", "slideIndex", "notes"]
+        }
+      },
+      {
+        name: "uploadFile",
+        description: "Upload a local file (any type: image, audio, video, PDF, etc.) to Google Drive",
+        inputSchema: {
+          type: "object",
+          properties: {
+            localPath: { type: "string", description: "Absolute path to the local file to upload" },
+            name: { type: "string", description: "File name in Drive (defaults to local filename)", optional: true },
+            parentFolderId: { type: "string", description: "Parent folder ID or path (e.g., '/Work/Projects'). Creates folders if needed. Defaults to root.", optional: true },
+            mimeType: { type: "string", description: "MIME type (auto-detected from extension if omitted)", optional: true }
+          },
+          required: ["localPath"]
+        }
+      },
+      {
         name: "insertGoogleSlidesImage",
         description: "Insert an image into a Google Slides presentation from URL or Drive file",
         inputSchema: {
@@ -1515,7 +1602,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           supportsAllDrives: true
         });
 
-        const fileList = res.data.files?.map((f: drive_v3.Schema$File) => `${f.name} (${f.mimeType})`).join("\n") || '';
+        const fileList = res.data.files?.map((f: drive_v3.Schema$File) => `${f.name} (ID: ${f.id}, ${f.mimeType})`).join("\n") || '';
         log('Search results', { query: userQuery, resultCount: res.data.files?.length });
 
         let response = `Found ${res.data.files?.length ?? 0} files:\n${fileList}`;
@@ -1998,7 +2085,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         await sheets.spreadsheets.values.update({
           spreadsheetId: spreadsheet.data.spreadsheetId!,
           range: 'Sheet1!A1',
-          valueInputOption: 'RAW',
+          valueInputOption: args.valueInputOption || 'RAW',
           requestBody: { values: args.data }
         });
 
@@ -2019,7 +2106,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         await sheets.spreadsheets.values.update({
           spreadsheetId: args.spreadsheetId,
           range: args.range,
-          valueInputOption: 'RAW',
+          valueInputOption: args.valueInputOption || 'RAW',
           requestBody: { values: args.data }
         });
 
@@ -2946,7 +3033,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         slides.forEach((slide, index) => {
           if (!slide || !slide.objectId) return;
           
-          content += `\nSlide ${(args.slideIndex ?? index) + 1} (ID: ${slide.objectId}):\n`;
+          content += `\nSlide ${args.slideIndex ?? index} (ID: ${slide.objectId}):\n`;
           content += '----------------------------\n';
 
           if (slide.pageElements) {
@@ -3422,6 +3509,188 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "getGoogleSlidesSpeakerNotes": {
+        const validation = GetGoogleSlidesSpeakerNotesSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const slidesService = google.slides({ version: 'v1', auth: authClient });
+
+        // Get the presentation to access the slide
+        const presentation = await slidesService.presentations.get({
+          presentationId: args.presentationId
+        });
+
+        if (!presentation.data.slides || args.slideIndex >= presentation.data.slides.length) {
+          return errorResponse(`Slide index ${args.slideIndex} not found in presentation (has ${presentation.data.slides?.length ?? 0} slides)`);
+        }
+
+        const slide = presentation.data.slides[args.slideIndex];
+
+        // Get the notes page object ID from the slide properties
+        const notesObjectId = slide.slideProperties?.notesPage?.notesProperties?.speakerNotesObjectId;
+
+        if (!notesObjectId) {
+          return {
+            content: [{ type: "text", text: "No speaker notes found for this slide" }],
+            isError: false
+          };
+        }
+
+        // Get the notes page to read the speaker notes text
+        const notesPageObjectId = slide.slideProperties?.notesPage?.objectId;
+        if (!notesPageObjectId) {
+          return {
+            content: [{ type: "text", text: "No speaker notes found for this slide" }],
+            isError: false
+          };
+        }
+
+        // Find the notes page for this slide
+        const notesPage = presentation.data.slides?.[args.slideIndex]?.slideProperties?.notesPage;
+
+        if (!notesPage || !notesPage.pageElements) {
+          return {
+            content: [{ type: "text", text: "No speaker notes found for this slide" }],
+            isError: false
+          };
+        }
+
+        // Find the speaker notes shape
+        const speakerNotesElement = notesPage.pageElements.find(
+          element => element.objectId === notesObjectId
+        );
+
+        if (!speakerNotesElement || !speakerNotesElement.shape?.text) {
+          return {
+            content: [{ type: "text", text: "No speaker notes found for this slide" }],
+            isError: false
+          };
+        }
+
+        // Extract the text from the speaker notes
+        let notesText = '';
+        const textElements = speakerNotesElement.shape.text.textElements || [];
+        textElements.forEach((textElement) => {
+          if (textElement.textRun?.content) {
+            notesText += textElement.textRun.content;
+          }
+        });
+
+        return {
+          content: [{ type: "text", text: notesText.trim() || "No speaker notes found for this slide" }],
+          isError: false
+        };
+      }
+
+      case "updateGoogleSlidesSpeakerNotes": {
+        const validation = UpdateGoogleSlidesSpeakerNotesSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const slidesService = google.slides({ version: 'v1', auth: authClient });
+
+        // Get the presentation to access the slide
+        const presentation = await slidesService.presentations.get({
+          presentationId: args.presentationId
+        });
+
+        if (!presentation.data.slides || args.slideIndex >= presentation.data.slides.length) {
+          return errorResponse(`Slide index ${args.slideIndex} not found in presentation (has ${presentation.data.slides?.length ?? 0} slides)`);
+        }
+
+        const slide = presentation.data.slides[args.slideIndex];
+
+        // Get the notes page object ID from the slide properties
+        const notesObjectId = slide.slideProperties?.notesPage?.notesProperties?.speakerNotesObjectId;
+
+        if (!notesObjectId) {
+          return errorResponse("This slide does not have a speaker notes object. Speaker notes may need to be initialized manually in Google Slides first.");
+        }
+
+        // Create the batchUpdate request to replace the speaker notes text
+        const requests = [
+          {
+            deleteText: {
+              objectId: notesObjectId,
+              textRange: {
+                type: 'ALL'
+              }
+            }
+          },
+          {
+            insertText: {
+              objectId: notesObjectId,
+              text: args.notes,
+              insertionIndex: 0
+            }
+          }
+        ];
+
+        await slidesService.presentations.batchUpdate({
+          presentationId: args.presentationId,
+          requestBody: { requests }
+        });
+
+        return {
+          content: [{ type: "text", text: `Successfully updated speaker notes for slide ${args.slideIndex}` }],
+          isError: false
+        };
+      }
+
+      case "uploadFile": {
+        const validation = UploadFileSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        // Validate local file exists
+        if (!existsSync(args.localPath)) {
+          return errorResponse(`File not found: ${args.localPath}`);
+        }
+
+        const stats = statSync(args.localPath);
+        const fileName = args.name || args.localPath.split(/[\\/]/).pop() || 'upload';
+        const ext = fileName.split('.').pop()?.toLowerCase() || '';
+        const detectedMime = args.mimeType || BINARY_MIME_TYPES[ext] || 'application/octet-stream';
+        const parentId = await resolveFolderId(args.parentFolderId);
+
+        log('Uploading file', { localPath: args.localPath, name: fileName, mimeType: detectedMime, size: stats.size });
+
+        const file = await drive.files.create({
+          requestBody: {
+            name: fileName,
+            parents: [parentId]
+          },
+          media: {
+            mimeType: detectedMime,
+            body: createReadStream(args.localPath)
+          },
+          fields: 'id, name, size, mimeType, webViewLink',
+          supportsAllDrives: true
+        });
+
+        log('File uploaded successfully', { fileId: file.data?.id });
+        return {
+          content: [{
+            type: "text",
+            text: [
+              `Uploaded: ${file.data?.name || fileName}`,
+              `ID: ${file.data?.id || 'unknown'}`,
+              `Size: ${file.data?.size || stats.size} bytes`,
+              `Type: ${file.data?.mimeType || detectedMime}`,
+              file.data?.webViewLink ? `Link: ${file.data.webViewLink}` : ''
+            ].filter(Boolean).join('\n')
+          }],
+          isError: false
+        };
+      }
+
       case "insertGoogleSlidesImage": {
         const validation = InsertGoogleSlidesImageSchema.safeParse(request.params.arguments);
         if (!validation.success) {
@@ -3435,8 +3704,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Determine the image URL
         let url = args.imageUrl;
         if (!url && args.driveFileId) {
-          // For Drive files, we need to make them publicly accessible or use a different approach
-          // Using the export link format that works for images
           url = `https://drive.google.com/uc?export=download&id=${args.driveFileId}`;
         }
 
@@ -3486,14 +3753,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const args = validation.data;
 
         const slidesService = google.slides({ version: 'v1', auth: authClient });
-        
-        // Map size enum to pixel dimensions
-        const sizeMap: Record<string, string> = {
-          'SMALL': 's200',
-          'MEDIUM': 's800', 
-          'LARGE': 's1600'
-        };
-        const sizeParam = sizeMap[args.thumbnailSize || 'LARGE'] || 's1600';
 
         const response = await slidesService.presentations.pages.getThumbnail({
           presentationId: args.presentationId,
