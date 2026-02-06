@@ -552,6 +552,19 @@ const CreateGoogleSlidesShapeSchema = z.object({
   }).optional()
 });
 
+const InsertGoogleSlidesImageSchema = z.object({
+  presentationId: z.string().min(1, "Presentation ID is required"),
+  pageObjectId: z.string().min(1, "Page object ID is required"),
+  imageUrl: z.string().optional(),
+  driveFileId: z.string().optional(),
+  x: z.number(),
+  y: z.number(),
+  width: z.number(),
+  height: z.number()
+}).refine(data => data.imageUrl || data.driveFileId, {
+  message: "Either imageUrl or driveFileId must be provided"
+});
+
 // -----------------------------------------------------------------------------
 // SERVER SETUP
 // -----------------------------------------------------------------------------
@@ -1380,6 +1393,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             }
           },
           required: ["presentationId", "pageObjectId", "shapeType", "x", "y", "width", "height"]
+        }
+      },
+      {
+        name: "insertGoogleSlidesImage",
+        description: "Insert an image into a Google Slides presentation from URL or Drive file",
+        inputSchema: {
+          type: "object",
+          properties: {
+            presentationId: { type: "string", description: "Presentation ID" },
+            pageObjectId: { type: "string", description: "Slide ID" },
+            imageUrl: { type: "string", description: "Public URL of the image (optional if driveFileId provided)" },
+            driveFileId: { type: "string", description: "Google Drive file ID of the image (optional if imageUrl provided)" },
+            x: { type: "number", description: "X position in EMU (1 inch = 914400 EMU)" },
+            y: { type: "number", description: "Y position in EMU" },
+            width: { type: "number", description: "Width in EMU" },
+            height: { type: "number", description: "Height in EMU" }
+          },
+          required: ["presentationId", "pageObjectId", "x", "y", "width", "height"]
         }
       }
     ]
@@ -3326,6 +3357,62 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: `Created ${args.shapeType} shape with ID: ${elementId}` }],
+          isError: false
+        };
+      }
+
+      case "insertGoogleSlidesImage": {
+        const validation = InsertGoogleSlidesImageSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const slidesService = google.slides({ version: 'v1', auth: authClient });
+        const elementId = `image_${uuidv4().substring(0, 8)}`;
+
+        // Determine the image URL
+        let url = args.imageUrl;
+        if (!url && args.driveFileId) {
+          // For Drive files, we need to make them publicly accessible or use a different approach
+          // Using the export link format that works for images
+          url = `https://drive.google.com/uc?export=download&id=${args.driveFileId}`;
+        }
+
+        if (!url) {
+          return errorResponse("Either imageUrl or driveFileId must be provided");
+        }
+
+        const requests = [
+          {
+            createImage: {
+              objectId: elementId,
+              url: url,
+              elementProperties: {
+                pageObjectId: args.pageObjectId,
+                size: {
+                  width: { magnitude: args.width, unit: 'EMU' },
+                  height: { magnitude: args.height, unit: 'EMU' }
+                },
+                transform: {
+                  scaleX: 1,
+                  scaleY: 1,
+                  translateX: args.x,
+                  translateY: args.y,
+                  unit: 'EMU'
+                }
+              }
+            }
+          }
+        ];
+
+        await slidesService.presentations.batchUpdate({
+          presentationId: args.presentationId,
+          requestBody: { requests }
+        });
+
+        return {
+          content: [{ type: "text", text: `Inserted image with ID: ${elementId}` }],
           isError: false
         };
       }
