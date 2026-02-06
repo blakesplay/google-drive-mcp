@@ -2908,7 +2908,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         slides.forEach((slide, index) => {
           if (!slide || !slide.objectId) return;
           
-          content += `\nSlide ${args.slideIndex ?? index} (ID: ${slide.objectId}):\n`;
+          content += `\nSlide ${(args.slideIndex ?? index) + 1} (ID: ${slide.objectId}):\n`;
           content += '----------------------------\n';
 
           if (slide.pageElements) {
