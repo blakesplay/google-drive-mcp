@@ -571,6 +571,11 @@ const GetGoogleSlidesThumbnailSchema = z.object({
   thumbnailSize: z.enum(['SMALL', 'MEDIUM', 'LARGE']).optional()
 });
 
+const DeleteGoogleSlideSchema = z.object({
+  presentationId: z.string().min(1, "Presentation ID is required"),
+  pageObjectId: z.string().min(1, "Page/Slide object ID to delete")
+});
+
 // -----------------------------------------------------------------------------
 // SERVER SETUP
 // -----------------------------------------------------------------------------
@@ -1432,6 +1437,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Thumbnail size: SMALL (200px), MEDIUM (800px), or LARGE (1600px). Default: LARGE",
               enum: ["SMALL", "MEDIUM", "LARGE"]
             }
+          },
+          required: ["presentationId", "pageObjectId"]
+        }
+      },
+      {
+        name: "deleteGoogleSlide",
+        description: "Delete a slide from a Google Slides presentation",
+        inputSchema: {
+          type: "object",
+          properties: {
+            presentationId: { type: "string", description: "Presentation ID" },
+            pageObjectId: { type: "string", description: "Slide ID to delete (from getGoogleSlidesContent)" }
           },
           required: ["presentationId", "pageObjectId"]
         }
@@ -3469,6 +3486,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{ 
             type: "text", 
             text: `Thumbnail URL: ${thumbnail.contentUrl}\nWidth: ${thumbnail.width}px\nHeight: ${thumbnail.height}px`
+          }],
+          isError: false
+        };
+      }
+
+      case "deleteGoogleSlide": {
+        const validation = DeleteGoogleSlideSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const slidesService = google.slides({ version: 'v1', auth: authClient });
+        
+        await slidesService.presentations.batchUpdate({
+          presentationId: args.presentationId,
+          requestBody: {
+            requests: [
+              {
+                deleteObject: {
+                  objectId: args.pageObjectId
+                }
+              }
+            ]
+          }
+        });
+
+        return {
+          content: [{ 
+            type: "text", 
+            text: `Deleted slide: ${args.pageObjectId}`
           }],
           isError: false
         };
