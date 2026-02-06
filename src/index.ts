@@ -565,6 +565,12 @@ const InsertGoogleSlidesImageSchema = z.object({
   message: "Either imageUrl or driveFileId must be provided"
 });
 
+const GetGoogleSlidesThumbnailSchema = z.object({
+  presentationId: z.string().min(1, "Presentation ID is required"),
+  pageObjectId: z.string().min(1, "Page object ID is required"),
+  thumbnailSize: z.enum(['SMALL', 'MEDIUM', 'LARGE']).optional()
+});
+
 // -----------------------------------------------------------------------------
 // SERVER SETUP
 // -----------------------------------------------------------------------------
@@ -1411,6 +1417,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             height: { type: "number", description: "Height in EMU" }
           },
           required: ["presentationId", "pageObjectId", "x", "y", "width", "height"]
+        }
+      },
+      {
+        name: "getGoogleSlidesThumbnail",
+        description: "Get a thumbnail image URL for a specific slide in a Google Slides presentation",
+        inputSchema: {
+          type: "object",
+          properties: {
+            presentationId: { type: "string", description: "Presentation ID" },
+            pageObjectId: { type: "string", description: "Slide ID (from getGoogleSlidesContent)" },
+            thumbnailSize: { 
+              type: "string", 
+              description: "Thumbnail size: SMALL (200px), MEDIUM (800px), or LARGE (1600px). Default: LARGE",
+              enum: ["SMALL", "MEDIUM", "LARGE"]
+            }
+          },
+          required: ["presentationId", "pageObjectId"]
         }
       }
     ]
@@ -3413,6 +3436,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: `Inserted image with ID: ${elementId}` }],
+          isError: false
+        };
+      }
+
+      case "getGoogleSlidesThumbnail": {
+        const validation = GetGoogleSlidesThumbnailSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const slidesService = google.slides({ version: 'v1', auth: authClient });
+        
+        // Map size enum to pixel dimensions
+        const sizeMap: Record<string, string> = {
+          'SMALL': 's200',
+          'MEDIUM': 's800', 
+          'LARGE': 's1600'
+        };
+        const sizeParam = sizeMap[args.thumbnailSize || 'LARGE'] || 's1600';
+
+        const response = await slidesService.presentations.pages.getThumbnail({
+          presentationId: args.presentationId,
+          pageObjectId: args.pageObjectId,
+          'thumbnailProperties.thumbnailSize': args.thumbnailSize || 'LARGE'
+        });
+
+        const thumbnail = response.data;
+        
+        return {
+          content: [{ 
+            type: "text", 
+            text: `Thumbnail URL: ${thumbnail.contentUrl}\nWidth: ${thumbnail.width}px\nHeight: ${thumbnail.height}px`
+          }],
           isError: false
         };
       }
