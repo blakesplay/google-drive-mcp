@@ -5,14 +5,15 @@ import http from 'http';
 import open from 'open';
 import { loadCredentials } from './client.js';
 
-// OAuth scopes for Google Drive, Docs, Sheets, and Slides
+// OAuth scopes for Google Drive, Docs, Sheets, Slides, and Calendar
 const SCOPES = [
   'https://www.googleapis.com/auth/drive',
   'https://www.googleapis.com/auth/drive.file',
   'https://www.googleapis.com/auth/drive.readonly',
   'https://www.googleapis.com/auth/documents',
   'https://www.googleapis.com/auth/spreadsheets',
-  'https://www.googleapis.com/auth/presentations'
+  'https://www.googleapis.com/auth/presentations',
+  'https://www.googleapis.com/auth/calendar'
 ];
 
 export class AuthServer {

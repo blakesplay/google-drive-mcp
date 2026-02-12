@@ -319,6 +319,20 @@ const MoveItemSchema = z.object({
   destinationFolderId: z.string().optional()
 });
 
+const ShareFileSchema = z.object({
+  fileId: z.string().min(1, "File ID is required"),
+  role: z.enum(["reader", "writer", "commenter"]).default("reader"),
+  type: z.enum(["anyone", "user", "group", "domain"]).default("anyone"),
+  emailAddress: z.string().optional(),
+  domain: z.string().optional()
+});
+
+const CopyFileSchema = z.object({
+  fileId: z.string().min(1, "File ID is required"),
+  name: z.string().optional(),
+  destinationFolderId: z.string().optional()
+});
+
 const CreateGoogleDocSchema = z.object({
   name: z.string().min(1, "Document name is required"),
   content: z.string(),
@@ -620,6 +634,48 @@ const ReplaceAllTextInSlidesSchema = z.object({
   matchCase: z.boolean().optional().default(false)
 });
 
+// Calendar schemas
+const ListCalendarsSchema = z.object({});
+
+const GetCalendarEventsSchema = z.object({
+  calendarId: z.string().default("primary"),
+  timeMin: z.string().optional(),
+  timeMax: z.string().optional(),
+  maxResults: z.number().int().min(1).max(2500).optional(),
+  query: z.string().optional()
+});
+
+const CreateCalendarEventSchema = z.object({
+  calendarId: z.string().default("primary"),
+  summary: z.string().min(1, "Event summary is required"),
+  description: z.string().optional(),
+  location: z.string().optional(),
+  startDateTime: z.string().min(1, "Start date/time is required (ISO format)"),
+  endDateTime: z.string().min(1, "End date/time is required (ISO format)"),
+  startTimeZone: z.string().optional(),
+  endTimeZone: z.string().optional(),
+  attendees: z.array(z.string()).optional(),
+  recurrence: z.array(z.string()).optional()
+});
+
+const UpdateCalendarEventSchema = z.object({
+  calendarId: z.string().default("primary"),
+  eventId: z.string().min(1, "Event ID is required"),
+  summary: z.string().optional(),
+  description: z.string().optional(),
+  location: z.string().optional(),
+  startDateTime: z.string().optional(),
+  endDateTime: z.string().optional(),
+  startTimeZone: z.string().optional(),
+  endTimeZone: z.string().optional(),
+  attendees: z.array(z.string()).optional()
+});
+
+const DeleteCalendarEventSchema = z.object({
+  calendarId: z.string().default("primary"),
+  eventId: z.string().min(1, "Event ID is required")
+});
+
 // -----------------------------------------------------------------------------
 // SERVER SETUP
 // -----------------------------------------------------------------------------
@@ -885,6 +941,34 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             destinationFolderId: { type: "string", description: "Destination folder ID", optional: true }
           },
           required: ["itemId"]
+        }
+      },
+      {
+        name: "shareFile",
+        description: "Share a file or folder with specific permissions. Use type='anyone' to make publicly accessible.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            fileId: { type: "string", description: "ID of the file to share" },
+            role: { type: "string", enum: ["reader", "writer", "commenter"], description: "Permission level (default: reader)" },
+            type: { type: "string", enum: ["anyone", "user", "group", "domain"], description: "Who to share with (default: anyone)" },
+            emailAddress: { type: "string", description: "Email address (required for user/group type)" },
+            domain: { type: "string", description: "Domain (required for domain type)" }
+          },
+          required: ["fileId"]
+        }
+      },
+      {
+        name: "copyFile",
+        description: "Copy a file to a new location. Optionally rename and/or move to a different folder.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            fileId: { type: "string", description: "ID of the file to copy" },
+            name: { type: "string", description: "New name for the copy (optional, defaults to 'Copy of [original]')" },
+            destinationFolderId: { type: "string", description: "Destination folder ID (optional, defaults to same folder)" }
+          },
+          required: ["fileId"]
         }
       },
       {
@@ -1560,6 +1644,81 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
           required: ["presentationId", "findText", "replaceText"]
         }
+      },
+      // --- Google Calendar tools ---
+      {
+        name: "listCalendars",
+        description: "List all Google Calendars the user has access to",
+        inputSchema: {
+          type: "object",
+          properties: {}
+        }
+      },
+      {
+        name: "getCalendarEvents",
+        description: "Get events from a Google Calendar with optional date range filter",
+        inputSchema: {
+          type: "object",
+          properties: {
+            calendarId: { type: "string", description: "Calendar ID (default: 'primary')" },
+            timeMin: { type: "string", description: "Start of time range (ISO datetime, e.g. '2025-01-01T00:00:00Z')" },
+            timeMax: { type: "string", description: "End of time range (ISO datetime)" },
+            maxResults: { type: "number", description: "Max events to return (default 50, max 2500)" },
+            query: { type: "string", description: "Free-text search query to filter events" }
+          }
+        }
+      },
+      {
+        name: "createCalendarEvent",
+        description: "Create a new event on a Google Calendar",
+        inputSchema: {
+          type: "object",
+          properties: {
+            calendarId: { type: "string", description: "Calendar ID (default: 'primary')" },
+            summary: { type: "string", description: "Event title" },
+            description: { type: "string", description: "Event description" },
+            location: { type: "string", description: "Event location" },
+            startDateTime: { type: "string", description: "Start date/time in ISO format (e.g. '2025-06-15T10:00:00-05:00')" },
+            endDateTime: { type: "string", description: "End date/time in ISO format" },
+            startTimeZone: { type: "string", description: "Start time zone (e.g. 'America/Chicago'). Defaults to calendar time zone." },
+            endTimeZone: { type: "string", description: "End time zone. Defaults to calendar time zone." },
+            attendees: { type: "array", items: { type: "string" }, description: "List of attendee email addresses" },
+            recurrence: { type: "array", items: { type: "string" }, description: "Recurrence rules (RRULE format, e.g. ['RRULE:FREQ=WEEKLY;COUNT=5'])" }
+          },
+          required: ["summary", "startDateTime", "endDateTime"]
+        }
+      },
+      {
+        name: "updateCalendarEvent",
+        description: "Update an existing event on a Google Calendar",
+        inputSchema: {
+          type: "object",
+          properties: {
+            calendarId: { type: "string", description: "Calendar ID (default: 'primary')" },
+            eventId: { type: "string", description: "ID of the event to update" },
+            summary: { type: "string", description: "New event title" },
+            description: { type: "string", description: "New event description" },
+            location: { type: "string", description: "New event location" },
+            startDateTime: { type: "string", description: "New start date/time in ISO format" },
+            endDateTime: { type: "string", description: "New end date/time in ISO format" },
+            startTimeZone: { type: "string", description: "Start time zone" },
+            endTimeZone: { type: "string", description: "End time zone" },
+            attendees: { type: "array", items: { type: "string" }, description: "Updated list of attendee email addresses" }
+          },
+          required: ["eventId"]
+        }
+      },
+      {
+        name: "deleteCalendarEvent",
+        description: "Delete an event from a Google Calendar",
+        inputSchema: {
+          type: "object",
+          properties: {
+            calendarId: { type: "string", description: "Calendar ID (default: 'primary')" },
+            eventId: { type: "string", description: "ID of the event to delete" }
+          },
+          required: ["eventId"]
+        }
       }
     ]
   };
@@ -1882,6 +2041,94 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{
             type: "text",
             text: `Successfully moved "${item.data.name}" to "${destinationFolder.data.name}"`
+          }],
+          isError: false
+        };
+      }
+
+      case "shareFile": {
+        const validation = ShareFileSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        // Get file info for nice response
+        const file = await drive.files.get({ fileId: args.fileId, fields: 'name', supportsAllDrives: true });
+
+        // Build permission object
+        const permission: any = {
+          role: args.role || 'reader',
+          type: args.type || 'anyone'
+        };
+
+        // Add email for user/group, domain for domain type
+        if (args.type === 'user' || args.type === 'group') {
+          if (!args.emailAddress) {
+            return errorResponse("emailAddress is required for user/group sharing");
+          }
+          permission.emailAddress = args.emailAddress;
+        } else if (args.type === 'domain') {
+          if (!args.domain) {
+            return errorResponse("domain is required for domain sharing");
+          }
+          permission.domain = args.domain;
+        }
+
+        // Create the permission
+        await drive.permissions.create({
+          fileId: args.fileId,
+          requestBody: permission,
+          supportsAllDrives: true
+        });
+
+        const shareType = args.type === 'anyone' ? 'publicly' : `with ${args.emailAddress || args.domain || args.type}`;
+        
+        return {
+          content: [{
+            type: "text",
+            text: `Successfully shared "${file.data.name}" ${shareType} as ${args.role || 'reader'}`
+          }],
+          isError: false
+        };
+      }
+
+      case "copyFile": {
+        const validation = CopyFileSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        // Get original file info
+        const originalFile = await drive.files.get({ 
+          fileId: args.fileId, 
+          fields: 'name, parents', 
+          supportsAllDrives: true 
+        });
+
+        // Determine destination folder
+        const destinationFolderId = args.destinationFolderId 
+          ? await resolveFolderId(args.destinationFolderId)
+          : (originalFile.data.parents?.[0] || 'root');
+
+        // Determine new name
+        const newName = args.name || `Copy of ${originalFile.data.name}`;
+
+        // Copy the file
+        const copiedFile = await drive.files.copy({
+          fileId: args.fileId,
+          requestBody: {
+            name: newName,
+            parents: [destinationFolderId]
+          },
+          supportsAllDrives: true
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Successfully copied "${originalFile.data.name}" as "${newName}"\nNew file ID: ${copiedFile.data.id}`
           }],
           isError: false
         };
@@ -3835,6 +4082,173 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             type: "text", 
             text: `Replaced ${occurrences} occurrence(s) of "${args.findText}" with "${args.replaceText}"`
           }],
+          isError: false
+        };
+      }
+
+      // --- Google Calendar tools ---
+
+      case "listCalendars": {
+        const calendarService = google.calendar({ version: 'v3', auth: authClient });
+        const res = await calendarService.calendarList.list();
+        const calendars = res.data.items || [];
+
+        const calendarList = calendars.map((c: any) =>
+          `${c.summary} (ID: ${c.id}, Access: ${c.accessRole}${c.primary ? ', PRIMARY' : ''})`
+        ).join('\n');
+
+        return {
+          content: [{ type: "text", text: `Found ${calendars.length} calendars:\n${calendarList}` }],
+          isError: false
+        };
+      }
+
+      case "getCalendarEvents": {
+        const validation = GetCalendarEventsSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+        const calendarService = google.calendar({ version: 'v3', auth: authClient });
+
+        const params: any = {
+          calendarId: args.calendarId,
+          maxResults: args.maxResults || 50,
+          singleEvents: true,
+          orderBy: 'startTime'
+        };
+        if (args.timeMin) params.timeMin = args.timeMin;
+        if (args.timeMax) params.timeMax = args.timeMax;
+        if (args.query) params.q = args.query;
+
+        const res = await calendarService.events.list(params);
+        const events = res.data.items || [];
+
+        if (events.length === 0) {
+          return {
+            content: [{ type: "text", text: "No events found." }],
+            isError: false
+          };
+        }
+
+        const eventList = events.map((e: any) => {
+          const start = e.start?.dateTime || e.start?.date || 'unknown';
+          const end = e.end?.dateTime || e.end?.date || '';
+          let line = `- ${e.summary || '(No title)'} | ${start} → ${end} (ID: ${e.id})`;
+          if (e.location) line += `\n  Location: ${e.location}`;
+          if (e.description) line += `\n  Description: ${e.description.substring(0, 200)}`;
+          if (e.attendees?.length) {
+            line += `\n  Attendees: ${e.attendees.map((a: any) => a.email).join(', ')}`;
+          }
+          return line;
+        }).join('\n');
+
+        return {
+          content: [{ type: "text", text: `Found ${events.length} events:\n${eventList}` }],
+          isError: false
+        };
+      }
+
+      case "createCalendarEvent": {
+        const validation = CreateCalendarEventSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+        const calendarService = google.calendar({ version: 'v3', auth: authClient });
+
+        const eventBody: any = {
+          summary: args.summary,
+          start: {
+            dateTime: args.startDateTime,
+            timeZone: args.startTimeZone
+          },
+          end: {
+            dateTime: args.endDateTime,
+            timeZone: args.endTimeZone
+          }
+        };
+        if (args.description) eventBody.description = args.description;
+        if (args.location) eventBody.location = args.location;
+        if (args.attendees) {
+          eventBody.attendees = args.attendees.map((email: string) => ({ email }));
+        }
+        if (args.recurrence) eventBody.recurrence = args.recurrence;
+
+        const res = await calendarService.events.insert({
+          calendarId: args.calendarId,
+          requestBody: eventBody
+        });
+
+        const created = res.data;
+        return {
+          content: [{ type: "text", text: `Created event: ${created.summary}\nID: ${created.id}\nLink: ${created.htmlLink}\nStart: ${created.start?.dateTime || created.start?.date}\nEnd: ${created.end?.dateTime || created.end?.date}` }],
+          isError: false
+        };
+      }
+
+      case "updateCalendarEvent": {
+        const validation = UpdateCalendarEventSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+        const calendarService = google.calendar({ version: 'v3', auth: authClient });
+
+        // Fetch existing event to merge updates
+        const existing = await calendarService.events.get({
+          calendarId: args.calendarId,
+          eventId: args.eventId
+        });
+
+        const patch: any = {};
+        if (args.summary !== undefined) patch.summary = args.summary;
+        if (args.description !== undefined) patch.description = args.description;
+        if (args.location !== undefined) patch.location = args.location;
+        if (args.startDateTime) {
+          patch.start = {
+            dateTime: args.startDateTime,
+            timeZone: args.startTimeZone || existing.data.start?.timeZone
+          };
+        }
+        if (args.endDateTime) {
+          patch.end = {
+            dateTime: args.endDateTime,
+            timeZone: args.endTimeZone || existing.data.end?.timeZone
+          };
+        }
+        if (args.attendees) {
+          patch.attendees = args.attendees.map((email: string) => ({ email }));
+        }
+
+        const res = await calendarService.events.patch({
+          calendarId: args.calendarId,
+          eventId: args.eventId,
+          requestBody: patch
+        });
+
+        const updated = res.data;
+        return {
+          content: [{ type: "text", text: `Updated event: ${updated.summary}\nID: ${updated.id}\nLink: ${updated.htmlLink}\nStart: ${updated.start?.dateTime || updated.start?.date}\nEnd: ${updated.end?.dateTime || updated.end?.date}` }],
+          isError: false
+        };
+      }
+
+      case "deleteCalendarEvent": {
+        const validation = DeleteCalendarEventSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+        const calendarService = google.calendar({ version: 'v3', auth: authClient });
+
+        await calendarService.events.delete({
+          calendarId: args.calendarId,
+          eventId: args.eventId
+        });
+
+        return {
+          content: [{ type: "text", text: `Deleted event ${args.eventId} from calendar ${args.calendarId}` }],
           isError: false
         };
       }
