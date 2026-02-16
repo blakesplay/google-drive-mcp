@@ -646,6 +646,13 @@ const GetDocSmartChipsSchema = z.object({
   documentId: z.string().min(1, "Document ID is required")
 });
 
+const InsertPersonChipSchema = z.object({
+  documentId: z.string().min(1, "Document ID is required"),
+  email: z.string().email("Must be a valid email address"),
+  index: z.number().int().min(1, "Index must be >= 1").optional(),
+  atEnd: z.boolean().optional()
+});
+
 // Google Sheets extended schemas
 const AddDataValidationSchema = z.object({
   spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
@@ -1934,6 +1941,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             documentId: { type: "string", description: "Document ID" }
           },
           required: ["documentId"]
+        }
+      },
+      {
+        name: "insertPersonChip",
+        description: "Insert a person @mention smart chip into a Google Doc",
+        inputSchema: {
+          type: "object",
+          properties: {
+            documentId: { type: "string", description: "Document ID" },
+            email: { type: "string", description: "Email address of the person to mention" },
+            index: { type: "number", description: "Character index to insert at (1 = start). Use getGoogleDocContent to find indices." },
+            atEnd: { type: "boolean", description: "If true, append at end of document (ignores index)" }
+          },
+          required: ["documentId", "email"]
         }
       },
       // --- Google Docs extended tools ---
@@ -4886,6 +4907,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: `Deleted task ${args.taskId} from task list ${args.taskListId}` }],
+          isError: false
+        };
+      }
+
+      case "insertPersonChip": {
+        const validation = InsertPersonChipSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const docs = google.docs({ version: 'v1', auth: authClient });
+
+        const insertRequest: any = {
+          insertPerson: {
+            personProperties: {
+              email: args.email
+            }
+          }
+        };
+
+        if (args.atEnd) {
+          insertRequest.insertPerson.endOfSegmentLocation = {};
+        } else {
+          insertRequest.insertPerson.location = {
+            index: args.index || 1
+          };
+        }
+
+        await docs.documents.batchUpdate({
+          documentId: args.documentId,
+          requestBody: {
+            requests: [insertRequest]
+          }
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Inserted @mention for ${args.email} in document ${args.documentId}`
+          }],
           isError: false
         };
       }
