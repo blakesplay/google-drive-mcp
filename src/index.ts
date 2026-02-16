@@ -344,6 +344,13 @@ const UpdateGoogleDocSchema = z.object({
   content: z.string()
 });
 
+const InsertGoogleDocTextSchema = z.object({
+  documentId: z.string().min(1, "Document ID is required"),
+  text: z.string().min(1, "Text to insert is required"),
+  index: z.number().int().min(1, "Index must be >= 1 (1 = start of document)").optional(),
+  atEnd: z.boolean().optional()
+});
+
 const CreateGoogleSheetSchema = z.object({
   name: z.string().min(1, "Sheet name is required"),
   data: z.array(z.array(z.string())),
@@ -634,6 +641,14 @@ const ReplaceAllTextInSlidesSchema = z.object({
   matchCase: z.boolean().optional().default(false)
 });
 
+// Google Docs extended schemas
+const FindAndReplaceInDocSchema = z.object({
+  documentId: z.string().min(1, "Document ID is required"),
+  findText: z.string().min(1, "Text to find is required"),
+  replaceText: z.string(),
+  matchCase: z.boolean().optional().default(false)
+});
+
 // Calendar schemas
 const ListCalendarsSchema = z.object({});
 
@@ -674,6 +689,45 @@ const UpdateCalendarEventSchema = z.object({
 const DeleteCalendarEventSchema = z.object({
   calendarId: z.string().default("primary"),
   eventId: z.string().min(1, "Event ID is required")
+});
+
+// Google Tasks schemas
+const ListTaskListsSchema = z.object({});
+
+const GetTasksSchema = z.object({
+  taskListId: z.string().default("@default"),
+  showCompleted: z.boolean().optional(),
+  showHidden: z.boolean().optional(),
+  dueMin: z.string().optional(),
+  dueMax: z.string().optional(),
+  maxResults: z.number().int().min(1).max(100).optional()
+});
+
+const CreateTaskSchema = z.object({
+  taskListId: z.string().default("@default"),
+  title: z.string().min(1, "Task title is required"),
+  notes: z.string().optional(),
+  due: z.string().optional(),
+  parent: z.string().optional()
+});
+
+const UpdateTaskSchema = z.object({
+  taskListId: z.string().default("@default"),
+  taskId: z.string().min(1, "Task ID is required"),
+  title: z.string().optional(),
+  notes: z.string().optional(),
+  due: z.string().optional(),
+  status: z.enum(["needsAction", "completed"]).optional()
+});
+
+const CompleteTaskSchema = z.object({
+  taskListId: z.string().default("@default"),
+  taskId: z.string().min(1, "Task ID is required")
+});
+
+const DeleteTaskSchema = z.object({
+  taskListId: z.string().default("@default"),
+  taskId: z.string().min(1, "Task ID is required")
 });
 
 // -----------------------------------------------------------------------------
@@ -994,6 +1048,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             content: { type: "string", description: "New content" }
           },
           required: ["documentId", "content"]
+        }
+      },
+      {
+        name: "insertGoogleDocText",
+        description: "Insert text at a specific position in a Google Doc without replacing existing content. Use getGoogleDocContent to find the right index.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            documentId: { type: "string", description: "Doc ID" },
+            text: { type: "string", description: "Text to insert" },
+            index: { type: "number", description: "Character index to insert at (1 = start of document). Use getGoogleDocContent to find indices." },
+            atEnd: { type: "boolean", description: "If true, append text at end of document (ignores index)" }
+          },
+          required: ["documentId", "text"]
         }
       },
       {
@@ -1645,6 +1713,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["presentationId", "findText", "replaceText"]
         }
       },
+      // --- Google Docs extended tools ---
+      {
+        name: "findAndReplaceInDoc",
+        description: "Find and replace text in a Google Doc",
+        inputSchema: {
+          type: "object",
+          properties: {
+            documentId: { type: "string", description: "Document ID" },
+            findText: { type: "string", description: "Text to find" },
+            replaceText: { type: "string", description: "Text to replace with (use empty string to delete)" },
+            matchCase: { type: "boolean", description: "Match case (default: false)" }
+          },
+          required: ["documentId", "findText", "replaceText"]
+        }
+      },
       // --- Google Calendar tools ---
       {
         name: "listCalendars",
@@ -1718,6 +1801,85 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             eventId: { type: "string", description: "ID of the event to delete" }
           },
           required: ["eventId"]
+        }
+      },
+      // --- Google Tasks tools ---
+      {
+        name: "listTaskLists",
+        description: "List all Google Task lists the user has",
+        inputSchema: {
+          type: "object",
+          properties: {}
+        }
+      },
+      {
+        name: "getTasks",
+        description: "Get tasks from a Google Task list with optional filters",
+        inputSchema: {
+          type: "object",
+          properties: {
+            taskListId: { type: "string", description: "Task list ID (default: '@default')" },
+            showCompleted: { type: "boolean", description: "Show completed tasks (default: true)" },
+            showHidden: { type: "boolean", description: "Show hidden tasks (default: false)" },
+            dueMin: { type: "string", description: "Lower bound for due date (ISO datetime, e.g. '2025-01-01T00:00:00Z')" },
+            dueMax: { type: "string", description: "Upper bound for due date (ISO datetime)" },
+            maxResults: { type: "number", description: "Max tasks to return (default 100, max 100)" }
+          }
+        }
+      },
+      {
+        name: "createTask",
+        description: "Create a new task in a Google Task list",
+        inputSchema: {
+          type: "object",
+          properties: {
+            taskListId: { type: "string", description: "Task list ID (default: '@default')" },
+            title: { type: "string", description: "Task title" },
+            notes: { type: "string", description: "Task notes/description" },
+            due: { type: "string", description: "Due date in ISO format (e.g. '2025-06-15T00:00:00Z')" },
+            parent: { type: "string", description: "Parent task ID to create as a subtask" }
+          },
+          required: ["title"]
+        }
+      },
+      {
+        name: "updateTask",
+        description: "Update an existing task in a Google Task list",
+        inputSchema: {
+          type: "object",
+          properties: {
+            taskListId: { type: "string", description: "Task list ID (default: '@default')" },
+            taskId: { type: "string", description: "ID of the task to update" },
+            title: { type: "string", description: "New task title" },
+            notes: { type: "string", description: "New task notes/description" },
+            due: { type: "string", description: "New due date in ISO format" },
+            status: { type: "string", enum: ["needsAction", "completed"], description: "Task status" }
+          },
+          required: ["taskId"]
+        }
+      },
+      {
+        name: "completeTask",
+        description: "Mark a task as complete in a Google Task list",
+        inputSchema: {
+          type: "object",
+          properties: {
+            taskListId: { type: "string", description: "Task list ID (default: '@default')" },
+            taskId: { type: "string", description: "ID of the task to complete" }
+          },
+          required: ["taskId"]
+        }
+      },
+      {
+        name: "deleteTask",
+        description: "Delete a task from a Google Task list",
+        inputSchema: {
+          type: "object",
+          properties: {
+            taskListId: { type: "string", description: "Task list ID (default: '@default')" },
+            taskId: { type: "string", description: "ID of the task to delete" }
+          },
+          required: ["taskId"]
         }
       }
     ]
@@ -2280,6 +2442,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: `Updated Google Doc: ${document.data.title}` }],
+          isError: false
+        };
+      }
+
+      case "insertGoogleDocText": {
+        const validation = InsertGoogleDocTextSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const docs = google.docs({ version: 'v1', auth: authClient });
+        const document = await docs.documents.get({ documentId: args.documentId });
+
+        // Determine insertion index
+        let insertIndex: number;
+        if (args.atEnd) {
+          // Insert at end of document (before final newline)
+          const endIndex = document.data.body?.content?.[document.data.body.content.length - 1]?.endIndex || 1;
+          insertIndex = Math.max(1, endIndex - 1);
+        } else {
+          insertIndex = args.index || 1;
+        }
+
+        // Insert text at the specified position
+        await docs.documents.batchUpdate({
+          documentId: args.documentId,
+          requestBody: {
+            requests: [
+              {
+                insertText: { location: { index: insertIndex }, text: args.text }
+              }
+            ]
+          }
+        });
+
+        return {
+          content: [{ type: "text", text: `Inserted ${args.text.length} characters at index ${insertIndex} in "${document.data.title}"` }],
           isError: false
         };
       }
@@ -4249,6 +4449,226 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: `Deleted event ${args.eventId} from calendar ${args.calendarId}` }],
+          isError: false
+        };
+      }
+
+      // --- Google Tasks tools ---
+
+      case "listTaskLists": {
+        const tasksService = google.tasks({ version: 'v1', auth: authClient });
+        const res = await tasksService.tasklists.list();
+        const taskLists = res.data.items || [];
+
+        const listText = taskLists.map((tl: any) =>
+          `${tl.title} (ID: ${tl.id}, Updated: ${tl.updated})`
+        ).join('\n');
+
+        return {
+          content: [{ type: "text", text: `Found ${taskLists.length} task lists:\n${listText}` }],
+          isError: false
+        };
+      }
+
+      case "getTasks": {
+        const validation = GetTasksSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+        const tasksService = google.tasks({ version: 'v1', auth: authClient });
+
+        const params: any = {
+          tasklist: args.taskListId,
+          maxResults: args.maxResults || 100
+        };
+        if (args.showCompleted !== undefined) params.showCompleted = args.showCompleted;
+        if (args.showHidden !== undefined) params.showHidden = args.showHidden;
+        if (args.dueMin) params.dueMin = args.dueMin;
+        if (args.dueMax) params.dueMax = args.dueMax;
+
+        const res = await tasksService.tasks.list(params);
+        const tasks = res.data.items || [];
+
+        if (tasks.length === 0) {
+          return {
+            content: [{ type: "text", text: "No tasks found." }],
+            isError: false
+          };
+        }
+
+        const taskList = tasks.map((t: any) => {
+          let line = `- [${t.status === 'completed' ? 'x' : ' '}] ${t.title || '(No title)'} (ID: ${t.id})`;
+          if (t.due) line += `\n  Due: ${t.due}`;
+          if (t.notes) line += `\n  Notes: ${t.notes.substring(0, 200)}`;
+          if (t.parent) line += `\n  Parent: ${t.parent}`;
+          return line;
+        }).join('\n');
+
+        return {
+          content: [{ type: "text", text: `Found ${tasks.length} tasks:\n${taskList}` }],
+          isError: false
+        };
+      }
+
+      case "createTask": {
+        const validation = CreateTaskSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+        const tasksService = google.tasks({ version: 'v1', auth: authClient });
+
+        const taskBody: any = {
+          title: args.title
+        };
+        if (args.notes) taskBody.notes = args.notes;
+        if (args.due) taskBody.due = args.due;
+
+        const params: any = {
+          tasklist: args.taskListId,
+          requestBody: taskBody
+        };
+        if (args.parent) params.parent = args.parent;
+
+        const res = await tasksService.tasks.insert(params);
+        const created = res.data;
+
+        let response = `Created task: ${created.title}\nID: ${created.id}`;
+        if (created.due) response += `\nDue: ${created.due}`;
+        if (created.selfLink) response += `\nLink: ${created.selfLink}`;
+
+        return {
+          content: [{ type: "text", text: response }],
+          isError: false
+        };
+      }
+
+      case "updateTask": {
+        const validation = UpdateTaskSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+        const tasksService = google.tasks({ version: 'v1', auth: authClient });
+
+        // Fetch existing task to merge updates
+        const existing = await tasksService.tasks.get({
+          tasklist: args.taskListId,
+          task: args.taskId
+        });
+
+        const patch: any = { ...existing.data };
+        if (args.title !== undefined) patch.title = args.title;
+        if (args.notes !== undefined) patch.notes = args.notes;
+        if (args.due !== undefined) patch.due = args.due;
+        if (args.status !== undefined) {
+          patch.status = args.status;
+          if (args.status === 'completed') {
+            patch.completed = new Date().toISOString();
+          } else {
+            patch.completed = null;
+          }
+        }
+
+        const res = await tasksService.tasks.update({
+          tasklist: args.taskListId,
+          task: args.taskId,
+          requestBody: patch
+        });
+
+        const updated = res.data;
+        let response = `Updated task: ${updated.title}\nID: ${updated.id}\nStatus: ${updated.status}`;
+        if (updated.due) response += `\nDue: ${updated.due}`;
+
+        return {
+          content: [{ type: "text", text: response }],
+          isError: false
+        };
+      }
+
+      case "completeTask": {
+        const validation = CompleteTaskSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+        const tasksService = google.tasks({ version: 'v1', auth: authClient });
+
+        // Fetch then update to completed
+        const existing = await tasksService.tasks.get({
+          tasklist: args.taskListId,
+          task: args.taskId
+        });
+
+        const res = await tasksService.tasks.update({
+          tasklist: args.taskListId,
+          task: args.taskId,
+          requestBody: {
+            ...existing.data,
+            status: 'completed',
+            completed: new Date().toISOString()
+          }
+        });
+
+        return {
+          content: [{ type: "text", text: `Completed task: ${res.data.title} (ID: ${res.data.id})` }],
+          isError: false
+        };
+      }
+
+      case "deleteTask": {
+        const validation = DeleteTaskSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+        const tasksService = google.tasks({ version: 'v1', auth: authClient });
+
+        await tasksService.tasks.delete({
+          tasklist: args.taskListId,
+          task: args.taskId
+        });
+
+        return {
+          content: [{ type: "text", text: `Deleted task ${args.taskId} from task list ${args.taskListId}` }],
+          isError: false
+        };
+      }
+
+      case "findAndReplaceInDoc": {
+        const validation = FindAndReplaceInDocSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const docs = google.docs({ version: 'v1', auth: authClient });
+
+        const response = await docs.documents.batchUpdate({
+          documentId: args.documentId,
+          requestBody: {
+            requests: [
+              {
+                replaceAllText: {
+                  containsText: {
+                    text: args.findText,
+                    matchCase: args.matchCase
+                  },
+                  replaceText: args.replaceText
+                }
+              }
+            ]
+          }
+        });
+
+        const occurrences = response.data.replies?.[0]?.replaceAllText?.occurrencesChanged || 0;
+
+        return {
+          content: [{
+            type: "text",
+            text: `Replaced ${occurrences} occurrence(s) of "${args.findText}" with "${args.replaceText}" in document ${args.documentId}`
+          }],
           isError: false
         };
       }
