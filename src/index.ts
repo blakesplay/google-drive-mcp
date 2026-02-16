@@ -658,6 +658,14 @@ const InsertDocImageSchema = z.object({
   height: z.number().positive().optional()
 });
 
+const InsertDocTableSchema = z.object({
+  documentId: z.string().min(1, "Document ID is required"),
+  rows: z.number().int().min(1, "Must have at least 1 row"),
+  columns: z.number().int().min(1, "Must have at least 1 column"),
+  index: z.number().int().min(1, "Index must be >= 1").optional(),
+  atEnd: z.boolean().optional()
+});
+
 // Calendar schemas
 const ListCalendarsSchema = z.object({});
 
@@ -1751,6 +1759,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             height: { type: "number", description: "Image height in points (optional)" }
           },
           required: ["documentId", "imageUri"]
+        }
+      },
+      {
+        name: "insertDocTable",
+        description: "Insert a table into a Google Doc at a specific position",
+        inputSchema: {
+          type: "object",
+          properties: {
+            documentId: { type: "string", description: "Document ID" },
+            rows: { type: "number", description: "Number of rows" },
+            columns: { type: "number", description: "Number of columns" },
+            index: { type: "number", description: "Character index to insert at (1 = start). Use getGoogleDocContent to find indices." },
+            atEnd: { type: "boolean", description: "If true, append table at end of document (ignores index)" }
+          },
+          required: ["documentId", "rows", "columns"]
         }
       },
       // --- Google Calendar tools ---
@@ -4657,6 +4680,46 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: `Deleted task ${args.taskId} from task list ${args.taskListId}` }],
+          isError: false
+        };
+      }
+
+      case "insertDocTable": {
+        const validation = InsertDocTableSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const docs = google.docs({ version: 'v1', auth: authClient });
+
+        let insertIndex = args.index || 1;
+        if (args.atEnd) {
+          const document = await docs.documents.get({ documentId: args.documentId });
+          const endIdx = document.data.body?.content?.[document.data.body.content.length - 1]?.endIndex || 1;
+          insertIndex = Math.max(1, endIdx - 1);
+        }
+
+        await docs.documents.batchUpdate({
+          documentId: args.documentId,
+          requestBody: {
+            requests: [
+              {
+                insertTable: {
+                  rows: args.rows,
+                  columns: args.columns,
+                  location: { index: insertIndex }
+                }
+              }
+            ]
+          }
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Inserted ${args.rows}x${args.columns} table at index ${insertIndex} in document ${args.documentId}`
+          }],
           isError: false
         };
       }
