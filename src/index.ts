@@ -641,6 +641,32 @@ const ReplaceAllTextInSlidesSchema = z.object({
   matchCase: z.boolean().optional().default(false)
 });
 
+// Google Sheets extended schemas
+const AddDataValidationSchema = z.object({
+  spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
+  range: z.string().min(1, "Range is required (e.g., 'Sheet1!A1:A10')"),
+  type: z.enum(["ONE_OF_LIST", "NUMBER_BETWEEN", "NUMBER_GREATER", "NUMBER_LESS", "TEXT_CONTAINS", "CUSTOM_FORMULA"]),
+  values: z.array(z.string()).optional(),
+  customFormula: z.string().optional(),
+  showDropdown: z.boolean().optional().default(true),
+  strict: z.boolean().optional().default(true),
+  inputMessage: z.string().optional()
+});
+
+const AddNamedRangeSchema = z.object({
+  spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
+  name: z.string().min(1, "Named range name is required"),
+  range: z.string().min(1, "Range is required (e.g., 'Sheet1!A1:B10')")
+});
+
+const ProtectRangeSchema = z.object({
+  spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
+  range: z.string().min(1, "Range is required (e.g., 'Sheet1!A1:B10')"),
+  description: z.string().optional(),
+  warningOnly: z.boolean().optional().default(false),
+  editors: z.array(z.string()).optional()
+});
+
 // Google Drive extended schemas
 const GetRevisionsSchema = z.object({
   fileId: z.string().min(1, "File ID is required"),
@@ -1765,6 +1791,53 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             matchCase: { type: "boolean", description: "Match case (default: false)" }
           },
           required: ["presentationId", "findText", "replaceText"]
+        }
+      },
+      // --- Google Sheets extended tools ---
+      {
+        name: "addDataValidation",
+        description: "Add data validation rules (dropdowns, number ranges, etc.) to a range in a Google Sheet",
+        inputSchema: {
+          type: "object",
+          properties: {
+            spreadsheetId: { type: "string", description: "Spreadsheet ID" },
+            range: { type: "string", description: "Range in A1 notation (e.g., 'Sheet1!A1:A10')" },
+            type: { type: "string", enum: ["ONE_OF_LIST", "NUMBER_BETWEEN", "NUMBER_GREATER", "NUMBER_LESS", "TEXT_CONTAINS", "CUSTOM_FORMULA"], description: "Validation type" },
+            values: { type: "array", items: { type: "string" }, description: "List of allowed values (for ONE_OF_LIST) or [min, max] (for NUMBER_BETWEEN)" },
+            customFormula: { type: "string", description: "Custom formula (for CUSTOM_FORMULA type)" },
+            showDropdown: { type: "boolean", description: "Show dropdown in cell (default: true)" },
+            strict: { type: "boolean", description: "Reject invalid input (default: true)" },
+            inputMessage: { type: "string", description: "Help text shown when cell is selected" }
+          },
+          required: ["spreadsheetId", "range", "type"]
+        }
+      },
+      {
+        name: "addNamedRange",
+        description: "Create a named range in a Google Sheet",
+        inputSchema: {
+          type: "object",
+          properties: {
+            spreadsheetId: { type: "string", description: "Spreadsheet ID" },
+            name: { type: "string", description: "Name for the range (e.g., 'SalesData')" },
+            range: { type: "string", description: "Range in A1 notation (e.g., 'Sheet1!A1:B10')" }
+          },
+          required: ["spreadsheetId", "name", "range"]
+        }
+      },
+      {
+        name: "protectRange",
+        description: "Protect (lock) a range of cells in a Google Sheet",
+        inputSchema: {
+          type: "object",
+          properties: {
+            spreadsheetId: { type: "string", description: "Spreadsheet ID" },
+            range: { type: "string", description: "Range in A1 notation (e.g., 'Sheet1!A1:B10')" },
+            description: { type: "string", description: "Description of why range is protected" },
+            warningOnly: { type: "boolean", description: "If true, show warning but allow edits (default: false)" },
+            editors: { type: "array", items: { type: "string" }, description: "Email addresses of users who can edit this range" }
+          },
+          required: ["spreadsheetId", "range"]
         }
       },
       // --- Google Drive extended tools ---
@@ -4796,6 +4869,181 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: `Deleted task ${args.taskId} from task list ${args.taskListId}` }],
+          isError: false
+        };
+      }
+
+      case "addDataValidation": {
+        const validation = AddDataValidationSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const sheets = google.sheets({ version: 'v4', auth: authClient });
+
+        const rangeData = await sheets.spreadsheets.get({
+          spreadsheetId: args.spreadsheetId,
+          ranges: [args.range],
+          fields: 'sheets(properties(sheetId,title))'
+        });
+
+        const sheetName = args.range.includes('!') ? args.range.split('!')[0] : 'Sheet1';
+        const sheet = rangeData.data.sheets?.find(s => s.properties?.title === sheetName);
+        if (!sheet || sheet.properties?.sheetId === undefined || sheet.properties?.sheetId === null) {
+          return errorResponse(`Sheet "${sheetName}" not found`);
+        }
+
+        const a1Range = args.range.includes('!') ? args.range.split('!')[1] : args.range;
+        const gridRange = convertA1ToGridRange(a1Range, sheet.properties.sheetId!);
+
+        // Build condition based on type
+        const condition: any = { type: args.type };
+        if (args.type === 'ONE_OF_LIST' && args.values) {
+          condition.values = args.values.map(v => ({ userEnteredValue: v }));
+        } else if (args.type === 'NUMBER_BETWEEN' && args.values && args.values.length >= 2) {
+          condition.values = [
+            { userEnteredValue: args.values[0] },
+            { userEnteredValue: args.values[1] }
+          ];
+        } else if (['NUMBER_GREATER', 'NUMBER_LESS', 'TEXT_CONTAINS'].includes(args.type) && args.values?.length) {
+          condition.values = [{ userEnteredValue: args.values[0] }];
+        } else if (args.type === 'CUSTOM_FORMULA' && args.customFormula) {
+          condition.values = [{ userEnteredValue: args.customFormula }];
+        }
+
+        const rule: any = {
+          condition,
+          showCustomUi: args.showDropdown,
+          strict: args.strict
+        };
+        if (args.inputMessage) {
+          rule.inputMessage = args.inputMessage;
+        }
+
+        await sheets.spreadsheets.batchUpdate({
+          spreadsheetId: args.spreadsheetId,
+          requestBody: {
+            requests: [{
+              setDataValidation: {
+                range: gridRange,
+                rule
+              }
+            }]
+          }
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Added ${args.type} data validation to ${args.range} in spreadsheet ${args.spreadsheetId}`
+          }],
+          isError: false
+        };
+      }
+
+      case "addNamedRange": {
+        const validation = AddNamedRangeSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const sheets = google.sheets({ version: 'v4', auth: authClient });
+
+        const rangeData = await sheets.spreadsheets.get({
+          spreadsheetId: args.spreadsheetId,
+          ranges: [args.range],
+          fields: 'sheets(properties(sheetId,title))'
+        });
+
+        const sheetName = args.range.includes('!') ? args.range.split('!')[0] : 'Sheet1';
+        const sheet = rangeData.data.sheets?.find(s => s.properties?.title === sheetName);
+        if (!sheet || sheet.properties?.sheetId === undefined || sheet.properties?.sheetId === null) {
+          return errorResponse(`Sheet "${sheetName}" not found`);
+        }
+
+        const a1Range = args.range.includes('!') ? args.range.split('!')[1] : args.range;
+        const gridRange = convertA1ToGridRange(a1Range, sheet.properties.sheetId!);
+
+        const response = await sheets.spreadsheets.batchUpdate({
+          spreadsheetId: args.spreadsheetId,
+          requestBody: {
+            requests: [{
+              addNamedRange: {
+                namedRange: {
+                  name: args.name,
+                  range: gridRange
+                }
+              }
+            }]
+          }
+        });
+
+        const namedRangeId = response.data.replies?.[0]?.addNamedRange?.namedRange?.namedRangeId || 'unknown';
+
+        return {
+          content: [{
+            type: "text",
+            text: `Created named range "${args.name}" (ID: ${namedRangeId}) for ${args.range} in spreadsheet ${args.spreadsheetId}`
+          }],
+          isError: false
+        };
+      }
+
+      case "protectRange": {
+        const validation = ProtectRangeSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const sheets = google.sheets({ version: 'v4', auth: authClient });
+
+        const rangeData = await sheets.spreadsheets.get({
+          spreadsheetId: args.spreadsheetId,
+          ranges: [args.range],
+          fields: 'sheets(properties(sheetId,title))'
+        });
+
+        const sheetName = args.range.includes('!') ? args.range.split('!')[0] : 'Sheet1';
+        const sheet = rangeData.data.sheets?.find(s => s.properties?.title === sheetName);
+        if (!sheet || sheet.properties?.sheetId === undefined || sheet.properties?.sheetId === null) {
+          return errorResponse(`Sheet "${sheetName}" not found`);
+        }
+
+        const a1Range = args.range.includes('!') ? args.range.split('!')[1] : args.range;
+        const gridRange = convertA1ToGridRange(a1Range, sheet.properties.sheetId!);
+
+        const protectedRange: any = {
+          range: gridRange,
+          warningOnly: args.warningOnly
+        };
+        if (args.description) {
+          protectedRange.description = args.description;
+        }
+        if (args.editors) {
+          protectedRange.editors = { users: args.editors };
+        }
+
+        const response = await sheets.spreadsheets.batchUpdate({
+          spreadsheetId: args.spreadsheetId,
+          requestBody: {
+            requests: [{
+              addProtectedRange: {
+                protectedRange
+              }
+            }]
+          }
+        });
+
+        const protectedRangeId = response.data.replies?.[0]?.addProtectedRange?.protectedRange?.protectedRangeId || 'unknown';
+
+        return {
+          content: [{
+            type: "text",
+            text: `Protected range ${args.range} (ID: ${protectedRangeId})${args.warningOnly ? ' (warning only)' : ''} in spreadsheet ${args.spreadsheetId}`
+          }],
           isError: false
         };
       }
