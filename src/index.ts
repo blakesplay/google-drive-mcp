@@ -653,6 +653,20 @@ const InsertPersonChipSchema = z.object({
   atEnd: z.boolean().optional()
 });
 
+const InsertDateChipSchema = z.object({
+  documentId: z.string().min(1, "Document ID is required"),
+  date: z.string().min(1, "Date is required (ISO format, e.g., '2025-03-15')"),
+  index: z.number().int().min(1, "Index must be >= 1").optional(),
+  atEnd: z.boolean().optional()
+});
+
+const InsertFileChipSchema = z.object({
+  documentId: z.string().min(1, "Document ID is required"),
+  fileId: z.string().min(1, "Google Drive file ID is required"),
+  index: z.number().int().min(1, "Index must be >= 1").optional(),
+  atEnd: z.boolean().optional()
+});
+
 // Google Sheets extended schemas
 const AddDataValidationSchema = z.object({
   spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
@@ -1955,6 +1969,34 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             atEnd: { type: "boolean", description: "If true, append at end of document (ignores index)" }
           },
           required: ["documentId", "email"]
+        }
+      },
+      {
+        name: "insertDateChip",
+        description: "Insert a date into a Google Doc. Note: The Docs API does not support native date smart chips, so this inserts a formatted date text as a workaround.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            documentId: { type: "string", description: "Document ID" },
+            date: { type: "string", description: "Date in ISO format (e.g., '2025-03-15')" },
+            index: { type: "number", description: "Character index to insert at (1 = start). Use getGoogleDocContent to find indices." },
+            atEnd: { type: "boolean", description: "If true, append at end of document (ignores index)" }
+          },
+          required: ["documentId", "date"]
+        }
+      },
+      {
+        name: "insertFileChip",
+        description: "Insert a Google Drive file link into a Google Doc. Inserts a linked file reference that Docs may render as a rich link chip.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            documentId: { type: "string", description: "Document ID" },
+            fileId: { type: "string", description: "Google Drive file ID to link" },
+            index: { type: "number", description: "Character index to insert at (1 = start). Use getGoogleDocContent to find indices." },
+            atEnd: { type: "boolean", description: "If true, append at end of document (ignores index)" }
+          },
+          required: ["documentId", "fileId"]
         }
       },
       // --- Google Docs extended tools ---
@@ -4907,6 +4949,57 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: `Deleted task ${args.taskId} from task list ${args.taskListId}` }],
+          isError: false
+        };
+      }
+
+      case "insertDateChip": {
+        const validation = InsertDateChipSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const docs = google.docs({ version: 'v1', auth: authClient });
+
+        // Parse and format the date
+        const dateObj = new Date(args.date);
+        if (isNaN(dateObj.getTime())) {
+          return errorResponse(`Invalid date format: ${args.date}. Use ISO format (e.g., '2025-03-15')`);
+        }
+        const formattedDate = dateObj.toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        });
+
+        let insertIndex = args.index || 1;
+        if (args.atEnd) {
+          const document = await docs.documents.get({ documentId: args.documentId });
+          const endIdx = document.data.body?.content?.[document.data.body.content.length - 1]?.endIndex || 1;
+          insertIndex = Math.max(1, endIdx - 1);
+        }
+
+        // Insert formatted date text (native date chips are not supported by the Docs API)
+        await docs.documents.batchUpdate({
+          documentId: args.documentId,
+          requestBody: {
+            requests: [
+              {
+                insertText: {
+                  location: { index: insertIndex },
+                  text: formattedDate
+                }
+              }
+            ]
+          }
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Inserted date "${formattedDate}" at index ${insertIndex} in document ${args.documentId}. Note: Native date smart chips are not yet supported by the Google Docs API — this was inserted as formatted text.`
+          }],
           isError: false
         };
       }
