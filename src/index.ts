@@ -641,6 +641,11 @@ const ReplaceAllTextInSlidesSchema = z.object({
   matchCase: z.boolean().optional().default(false)
 });
 
+// Google Docs smart chip schemas
+const GetDocSmartChipsSchema = z.object({
+  documentId: z.string().min(1, "Document ID is required")
+});
+
 // Google Sheets extended schemas
 const AddDataValidationSchema = z.object({
   spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
@@ -1917,6 +1922,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             insertionIndex: { type: "number", description: "Zero-based index where slides should be inserted" }
           },
           required: ["presentationId", "slideObjectIds", "insertionIndex"]
+        }
+      },
+      // --- Google Docs smart chip tools ---
+      {
+        name: "getDocSmartChips",
+        description: "Extract all smart chips (person mentions, file/URL links) from a Google Doc with their positions",
+        inputSchema: {
+          type: "object",
+          properties: {
+            documentId: { type: "string", description: "Document ID" }
+          },
+          required: ["documentId"]
         }
       },
       // --- Google Docs extended tools ---
@@ -4869,6 +4886,83 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: `Deleted task ${args.taskId} from task list ${args.taskListId}` }],
+          isError: false
+        };
+      }
+
+      case "getDocSmartChips": {
+        const validation = GetDocSmartChipsSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const docs = google.docs({ version: 'v1', auth: authClient });
+        const document = await docs.documents.get({ documentId: args.documentId });
+
+        const chips: Array<{
+          type: string;
+          startIndex: number;
+          endIndex: number;
+          properties: any;
+        }> = [];
+
+        if (document.data.body?.content) {
+          for (const element of document.data.body.content) {
+            if (element.paragraph?.elements) {
+              for (const el of element.paragraph.elements) {
+                if (el.person) {
+                  chips.push({
+                    type: 'person',
+                    startIndex: el.startIndex || 0,
+                    endIndex: el.endIndex || 0,
+                    properties: {
+                      name: el.person.personProperties?.name || null,
+                      email: el.person.personProperties?.email || null,
+                      personId: el.person.personId || null
+                    }
+                  });
+                }
+                if (el.richLink) {
+                  chips.push({
+                    type: 'richLink',
+                    startIndex: el.startIndex || 0,
+                    endIndex: el.endIndex || 0,
+                    properties: {
+                      title: el.richLink.richLinkProperties?.title || null,
+                      uri: el.richLink.richLinkProperties?.uri || null,
+                      mimeType: el.richLink.richLinkProperties?.mimeType || null,
+                      richLinkId: el.richLink.richLinkId || null
+                    }
+                  });
+                }
+              }
+            }
+          }
+        }
+
+        if (chips.length === 0) {
+          return {
+            content: [{ type: "text", text: `No smart chips found in document ${args.documentId}` }],
+            isError: false
+          };
+        }
+
+        const lines = chips.map(chip => {
+          if (chip.type === 'person') {
+            const p = chip.properties;
+            return `  [@Person] Index ${chip.startIndex}-${chip.endIndex} | ${p.name || 'unnamed'} <${p.email || 'no email'}>`;
+          } else {
+            const r = chip.properties;
+            return `  [RichLink] Index ${chip.startIndex}-${chip.endIndex} | "${r.title || 'untitled'}" → ${r.uri || 'no uri'} (${r.mimeType || 'unknown type'})`;
+          }
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Found ${chips.length} smart chip(s) in document ${args.documentId}:\n\n${lines.join('\n')}\n\nRaw data:\n${JSON.stringify(chips, null, 2)}`
+          }],
           isError: false
         };
       }
