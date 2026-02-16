@@ -648,6 +648,11 @@ const GetRevisionsSchema = z.object({
   pageToken: z.string().optional()
 });
 
+const RestoreRevisionSchema = z.object({
+  fileId: z.string().min(1, "File ID is required"),
+  revisionId: z.string().min(1, "Revision ID is required")
+});
+
 // Google Slides extended schemas
 const DuplicateSlideSchema = z.object({
   presentationId: z.string().min(1, "Presentation ID is required"),
@@ -1761,6 +1766,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             pageToken: { type: "string", description: "Page token for pagination" }
           },
           required: ["fileId"]
+        }
+      },
+      {
+        name: "restoreRevision",
+        description: "Restore a previous version of a Google Drive file by copying its content to the head revision",
+        inputSchema: {
+          type: "object",
+          properties: {
+            fileId: { type: "string", description: "File ID" },
+            revisionId: { type: "string", description: "Revision ID to restore (use getRevisions to find IDs)" }
+          },
+          required: ["fileId", "revisionId"]
         }
       },
       // --- Google Slides extended tools ---
@@ -4739,6 +4756,53 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: `Deleted task ${args.taskId} from task list ${args.taskListId}` }],
+          isError: false
+        };
+      }
+
+      case "restoreRevision": {
+        const validation = RestoreRevisionSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        ensureDriveService();
+
+        // Get the revision content
+        const revisionResponse = await drive.revisions.get({
+          fileId: args.fileId,
+          revisionId: args.revisionId,
+          alt: 'media'
+        }, { responseType: 'stream' });
+
+        // Get file metadata to know the MIME type
+        const fileMeta = await drive.files.get({
+          fileId: args.fileId,
+          fields: 'mimeType,name'
+        });
+
+        // Upload the revision content as an update to the file
+        const { Readable } = await import('stream');
+        const chunks: Buffer[] = [];
+        for await (const chunk of revisionResponse.data) {
+          chunks.push(Buffer.from(chunk));
+        }
+        const buffer = Buffer.concat(chunks);
+
+        await drive.files.update({
+          fileId: args.fileId,
+          media: {
+            mimeType: fileMeta.data.mimeType,
+            body: Readable.from(buffer)
+          }
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Restored file ${args.fileId} (${fileMeta.data.name}) to revision ${args.revisionId}`
+          }],
           isError: false
         };
       }
