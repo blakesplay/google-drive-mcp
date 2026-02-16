@@ -641,6 +641,18 @@ const ReplaceAllTextInSlidesSchema = z.object({
   matchCase: z.boolean().optional().default(false)
 });
 
+// Google Slides extended schemas
+const DuplicateSlideSchema = z.object({
+  presentationId: z.string().min(1, "Presentation ID is required"),
+  slideObjectId: z.string().min(1, "Slide object ID to duplicate is required")
+});
+
+const ReorderSlidesSchema = z.object({
+  presentationId: z.string().min(1, "Presentation ID is required"),
+  slideObjectIds: z.array(z.string().min(1)).min(1, "At least one slide object ID is required"),
+  insertionIndex: z.number().int().min(0, "Insertion index must be >= 0")
+});
+
 // Google Docs extended schemas
 const FindAndReplaceInDocSchema = z.object({
   documentId: z.string().min(1, "Document ID is required"),
@@ -1728,6 +1740,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             matchCase: { type: "boolean", description: "Match case (default: false)" }
           },
           required: ["presentationId", "findText", "replaceText"]
+        }
+      },
+      // --- Google Slides extended tools ---
+      {
+        name: "duplicateSlide",
+        description: "Duplicate an existing slide in a Google Slides presentation",
+        inputSchema: {
+          type: "object",
+          properties: {
+            presentationId: { type: "string", description: "Presentation ID" },
+            slideObjectId: { type: "string", description: "Object ID of the slide to duplicate" }
+          },
+          required: ["presentationId", "slideObjectId"]
+        }
+      },
+      {
+        name: "reorderSlides",
+        description: "Change the order of slides in a Google Slides presentation",
+        inputSchema: {
+          type: "object",
+          properties: {
+            presentationId: { type: "string", description: "Presentation ID" },
+            slideObjectIds: { type: "array", items: { type: "string" }, description: "Array of slide object IDs to move" },
+            insertionIndex: { type: "number", description: "Zero-based index where slides should be inserted" }
+          },
+          required: ["presentationId", "slideObjectIds", "insertionIndex"]
         }
       },
       // --- Google Docs extended tools ---
@@ -4680,6 +4718,71 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: `Deleted task ${args.taskId} from task list ${args.taskListId}` }],
+          isError: false
+        };
+      }
+
+      case "duplicateSlide": {
+        const validation = DuplicateSlideSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const slidesService = google.slides({ version: 'v1', auth: authClient });
+
+        const response = await slidesService.presentations.batchUpdate({
+          presentationId: args.presentationId,
+          requestBody: {
+            requests: [
+              {
+                duplicateObject: {
+                  objectId: args.slideObjectId
+                }
+              }
+            ]
+          }
+        });
+
+        const newSlideId = response.data.replies?.[0]?.duplicateObject?.objectId || 'unknown';
+
+        return {
+          content: [{
+            type: "text",
+            text: `Duplicated slide ${args.slideObjectId}. New slide ID: ${newSlideId}`
+          }],
+          isError: false
+        };
+      }
+
+      case "reorderSlides": {
+        const validation = ReorderSlidesSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const slidesService = google.slides({ version: 'v1', auth: authClient });
+
+        await slidesService.presentations.batchUpdate({
+          presentationId: args.presentationId,
+          requestBody: {
+            requests: [
+              {
+                updateSlidesPosition: {
+                  slideObjectIds: args.slideObjectIds,
+                  insertionIndex: args.insertionIndex
+                }
+              }
+            ]
+          }
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Moved ${args.slideObjectIds.length} slide(s) to index ${args.insertionIndex} in presentation ${args.presentationId}`
+          }],
           isError: false
         };
       }
