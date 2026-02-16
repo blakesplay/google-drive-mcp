@@ -649,6 +649,15 @@ const FindAndReplaceInDocSchema = z.object({
   matchCase: z.boolean().optional().default(false)
 });
 
+const InsertDocImageSchema = z.object({
+  documentId: z.string().min(1, "Document ID is required"),
+  imageUri: z.string().url("Must be a valid image URL"),
+  index: z.number().int().min(1, "Index must be >= 1").optional(),
+  atEnd: z.boolean().optional(),
+  width: z.number().positive().optional(),
+  height: z.number().positive().optional()
+});
+
 // Calendar schemas
 const ListCalendarsSchema = z.object({});
 
@@ -1726,6 +1735,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             matchCase: { type: "boolean", description: "Match case (default: false)" }
           },
           required: ["documentId", "findText", "replaceText"]
+        }
+      },
+      {
+        name: "insertDocImage",
+        description: "Insert an inline image into a Google Doc at a specific position",
+        inputSchema: {
+          type: "object",
+          properties: {
+            documentId: { type: "string", description: "Document ID" },
+            imageUri: { type: "string", description: "Public URL of the image to insert" },
+            index: { type: "number", description: "Character index to insert at (1 = start). Use getGoogleDocContent to find indices." },
+            atEnd: { type: "boolean", description: "If true, append image at end of document (ignores index)" },
+            width: { type: "number", description: "Image width in points (optional)" },
+            height: { type: "number", description: "Image height in points (optional)" }
+          },
+          required: ["documentId", "imageUri"]
         }
       },
       // --- Google Calendar tools ---
@@ -4632,6 +4657,52 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: `Deleted task ${args.taskId} from task list ${args.taskListId}` }],
+          isError: false
+        };
+      }
+
+      case "insertDocImage": {
+        const validation = InsertDocImageSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const docs = google.docs({ version: 'v1', auth: authClient });
+
+        let insertIndex = args.index || 1;
+        if (args.atEnd) {
+          const document = await docs.documents.get({ documentId: args.documentId });
+          const endIdx = document.data.body?.content?.[document.data.body.content.length - 1]?.endIndex || 1;
+          insertIndex = Math.max(1, endIdx - 1);
+        }
+
+        const insertRequest: any = {
+          insertInlineImage: {
+            uri: args.imageUri,
+            location: { index: insertIndex }
+          }
+        };
+
+        if (args.width || args.height) {
+          insertRequest.insertInlineImage.objectSize = {
+            ...(args.width ? { width: { magnitude: args.width, unit: 'PT' } } : {}),
+            ...(args.height ? { height: { magnitude: args.height, unit: 'PT' } } : {})
+          };
+        }
+
+        await docs.documents.batchUpdate({
+          documentId: args.documentId,
+          requestBody: {
+            requests: [insertRequest]
+          }
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Inserted image at index ${insertIndex} in document ${args.documentId}`
+          }],
           isError: false
         };
       }
