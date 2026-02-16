@@ -4953,6 +4953,69 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "insertFileChip": {
+        const validation = InsertFileChipSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const docs = google.docs({ version: 'v1', auth: authClient });
+
+        // Get file metadata to build the link text
+        ensureDriveService();
+        const fileMeta = await drive.files.get({
+          fileId: args.fileId,
+          fields: 'name,mimeType,webViewLink'
+        });
+
+        const fileName = fileMeta.data.name || args.fileId;
+        const fileUrl = fileMeta.data.webViewLink || `https://drive.google.com/file/d/${args.fileId}/view`;
+
+        let insertIndex = args.index || 1;
+        if (args.atEnd) {
+          const document = await docs.documents.get({ documentId: args.documentId });
+          const endIdx = document.data.body?.content?.[document.data.body.content.length - 1]?.endIndex || 1;
+          insertIndex = Math.max(1, endIdx - 1);
+        }
+
+        // Insert the file name as text, then apply a link to it
+        // Google Docs auto-converts Drive links to rich link chips
+        await docs.documents.batchUpdate({
+          documentId: args.documentId,
+          requestBody: {
+            requests: [
+              {
+                insertText: {
+                  location: { index: insertIndex },
+                  text: fileName
+                }
+              },
+              {
+                updateTextStyle: {
+                  range: {
+                    startIndex: insertIndex,
+                    endIndex: insertIndex + fileName.length
+                  },
+                  textStyle: {
+                    link: { url: fileUrl }
+                  },
+                  fields: 'link'
+                }
+              }
+            ]
+          }
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Inserted file link "${fileName}" at index ${insertIndex} in document ${args.documentId}. Google Docs may automatically render this as a rich link chip.`
+          }],
+          isError: false
+        };
+      }
+
       case "insertDateChip": {
         const validation = InsertDateChipSchema.safeParse(request.params.arguments);
         if (!validation.success) {
