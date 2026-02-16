@@ -648,6 +648,19 @@ const GetRevisionsSchema = z.object({
   pageToken: z.string().optional()
 });
 
+const AddCommentSchema = z.object({
+  fileId: z.string().min(1, "File ID is required"),
+  content: z.string().min(1, "Comment content is required"),
+  quotedContent: z.string().optional()
+});
+
+const GetCommentsSchema = z.object({
+  fileId: z.string().min(1, "File ID is required"),
+  pageSize: z.number().int().min(1).max(100).optional(),
+  pageToken: z.string().optional(),
+  includeDeleted: z.boolean().optional().default(false)
+});
+
 const RestoreRevisionSchema = z.object({
   fileId: z.string().min(1, "File ID is required"),
   revisionId: z.string().min(1, "Revision ID is required")
@@ -1764,6 +1777,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             fileId: { type: "string", description: "File ID" },
             pageSize: { type: "number", description: "Max revisions to return (default: 100, max: 1000)" },
             pageToken: { type: "string", description: "Page token for pagination" }
+          },
+          required: ["fileId"]
+        }
+      },
+      {
+        name: "addComment",
+        description: "Add a comment to a Google Drive file",
+        inputSchema: {
+          type: "object",
+          properties: {
+            fileId: { type: "string", description: "File ID" },
+            content: { type: "string", description: "Comment text" },
+            quotedContent: { type: "string", description: "Quoted text that the comment refers to (optional)" }
+          },
+          required: ["fileId", "content"]
+        }
+      },
+      {
+        name: "getComments",
+        description: "List comments on a Google Drive file",
+        inputSchema: {
+          type: "object",
+          properties: {
+            fileId: { type: "string", description: "File ID" },
+            pageSize: { type: "number", description: "Max comments to return (default: 20, max: 100)" },
+            pageToken: { type: "string", description: "Page token for pagination" },
+            includeDeleted: { type: "boolean", description: "Include deleted comments (default: false)" }
           },
           required: ["fileId"]
         }
@@ -4756,6 +4796,81 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: `Deleted task ${args.taskId} from task list ${args.taskListId}` }],
+          isError: false
+        };
+      }
+
+      case "addComment": {
+        const validation = AddCommentSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        ensureDriveService();
+
+        const requestBody: any = {
+          content: args.content
+        };
+        if (args.quotedContent) {
+          requestBody.quotedFileContent = { value: args.quotedContent };
+        }
+
+        const response = await drive.comments.create({
+          fileId: args.fileId,
+          fields: 'id,content,author,createdTime',
+          requestBody
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Comment added to file ${args.fileId}. Comment ID: ${response.data.id}`
+          }],
+          isError: false
+        };
+      }
+
+      case "getComments": {
+        const validation = GetCommentsSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        ensureDriveService();
+
+        const response = await drive.comments.list({
+          fileId: args.fileId,
+          pageSize: args.pageSize || 20,
+          pageToken: args.pageToken,
+          includeDeleted: args.includeDeleted,
+          fields: 'comments(id,content,author(displayName,emailAddress),createdTime,modifiedTime,resolved,quotedFileContent,replies(id,content,author(displayName),createdTime)),nextPageToken'
+        });
+
+        const comments = response.data.comments || [];
+        const lines = comments.map((c: any) => {
+          const author = c.author?.displayName || c.author?.emailAddress || 'unknown';
+          let line = `  ID: ${c.id} | By: ${author} | ${c.createdTime}${c.resolved ? ' [RESOLVED]' : ''}\n    "${c.content}"`;
+          if (c.quotedFileContent?.value) {
+            line += `\n    > Quoted: "${c.quotedFileContent.value}"`;
+          }
+          if (c.replies?.length) {
+            c.replies.forEach((r: any) => {
+              const rAuthor = r.author?.displayName || 'unknown';
+              line += `\n      Reply by ${rAuthor}: "${r.content}"`;
+            });
+          }
+          return line;
+        });
+
+        let result = `Found ${comments.length} comment(s) on file ${args.fileId}:\n${lines.join('\n\n')}`;
+        if (response.data.nextPageToken) {
+          result += `\n\nNext page token: ${response.data.nextPageToken}`;
+        }
+
+        return {
+          content: [{ type: "text", text: result }],
           isError: false
         };
       }
