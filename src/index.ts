@@ -641,6 +641,13 @@ const ReplaceAllTextInSlidesSchema = z.object({
   matchCase: z.boolean().optional().default(false)
 });
 
+// Google Drive extended schemas
+const GetRevisionsSchema = z.object({
+  fileId: z.string().min(1, "File ID is required"),
+  pageSize: z.number().int().min(1).max(1000).optional(),
+  pageToken: z.string().optional()
+});
+
 // Google Slides extended schemas
 const DuplicateSlideSchema = z.object({
   presentationId: z.string().min(1, "Presentation ID is required"),
@@ -1740,6 +1747,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             matchCase: { type: "boolean", description: "Match case (default: false)" }
           },
           required: ["presentationId", "findText", "replaceText"]
+        }
+      },
+      // --- Google Drive extended tools ---
+      {
+        name: "getRevisions",
+        description: "List version history (revisions) for a Google Drive file",
+        inputSchema: {
+          type: "object",
+          properties: {
+            fileId: { type: "string", description: "File ID" },
+            pageSize: { type: "number", description: "Max revisions to return (default: 100, max: 1000)" },
+            pageToken: { type: "string", description: "Page token for pagination" }
+          },
+          required: ["fileId"]
         }
       },
       // --- Google Slides extended tools ---
@@ -4718,6 +4739,38 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: `Deleted task ${args.taskId} from task list ${args.taskListId}` }],
+          isError: false
+        };
+      }
+
+      case "getRevisions": {
+        const validation = GetRevisionsSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        ensureDriveService();
+        const response = await drive.revisions.list({
+          fileId: args.fileId,
+          pageSize: args.pageSize || 100,
+          pageToken: args.pageToken,
+          fields: 'revisions(id,modifiedTime,lastModifyingUser,size,mimeType),nextPageToken'
+        });
+
+        const revisions = response.data.revisions || [];
+        const lines = revisions.map((r: any) => {
+          const user = r.lastModifyingUser?.displayName || r.lastModifyingUser?.emailAddress || 'unknown';
+          return `  ID: ${r.id} | Modified: ${r.modifiedTime} | By: ${user} | Size: ${r.size || 'N/A'}`;
+        });
+
+        let result = `Found ${revisions.length} revision(s) for file ${args.fileId}:\n${lines.join('\n')}`;
+        if (response.data.nextPageToken) {
+          result += `\n\nNext page token: ${response.data.nextPageToken}`;
+        }
+
+        return {
+          content: [{ type: "text", text: result }],
           isError: false
         };
       }
