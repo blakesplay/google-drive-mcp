@@ -6,6 +6,8 @@ import { TokenManager } from './auth/tokenManager.js';
 export { TokenManager } from './auth/tokenManager.js';
 export { initializeOAuth2Client } from './auth/client.js';
 export { AuthServer } from './auth/server.js';
+export { AccountManager } from './auth/accountManager.js';
+export type { AccountServices, AccountsConfig, AccountConfig } from './auth/accountManager.js';
 
 /**
  * Authenticate and return OAuth2 client
@@ -104,4 +106,14 @@ export async function runAuthCommand(): Promise<void> {
     console.error("\n❌ Authentication failed:", error);
     process.exit(1);
   }
+}
+
+/**
+ * Authenticate a specific account for multi-account mode.
+ * Used when running: npx google-drive-mcp auth --account user@example.com
+ */
+export async function authenticateAccount(email: string): Promise<void> {
+  const { AccountManager } = await import('./auth/accountManager.js');
+  const manager = new AccountManager();
+  await manager.authenticateAccount(email);
 }
