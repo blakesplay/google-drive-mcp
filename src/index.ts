@@ -11,7 +11,8 @@ import {
 import { google } from "googleapis";
 import type { drive_v3 } from "googleapis";
 import { v4 as uuidv4 } from 'uuid';
-import { authenticate, runAuthCommand, AuthServer, initializeOAuth2Client } from './auth.js';
+import { authenticate, runAuthCommand, AuthServer, initializeOAuth2Client, AccountManager, authenticateAccount } from './auth.js';
+import type { AccountServices } from './auth.js';
 import { z } from 'zod';
 import { fileURLToPath } from 'url';
 import { readFileSync, createReadStream, existsSync, statSync } from 'fs';
@@ -92,6 +93,9 @@ const BINARY_MIME_TYPES: Record<string, string> = {
 // Global auth client - will be initialized on first use
 let authClient: any = null;
 let authenticationPromise: Promise<any> | null = null;
+
+// Multi-account manager
+const accountManager = new AccountManager();
 
 // Get package version
 const __filename = fileURLToPath(import.meta.url);
@@ -274,12 +278,100 @@ async function checkFileExists(name: string, parentFolderId: string = 'root'): P
 }
 
 // -----------------------------------------------------------------------------
+// ACCOUNT-AWARE HELPER FUNCTIONS
+// -----------------------------------------------------------------------------
+
+/**
+ * Account-aware version of resolvePath that accepts a drive service parameter.
+ */
+async function resolvePathFor(pathStr: string, driveService: drive_v3.Drive): Promise<string> {
+  if (!pathStr || pathStr === '/') return 'root';
+
+  const parts = pathStr.replace(/^\/+|\/+$/g, '').split('/');
+  let currentFolderId: string = 'root';
+
+  for (const part of parts) {
+    if (!part) continue;
+    let response = await driveService.files.list({
+      q: `'${currentFolderId}' in parents and name = '${part}' and mimeType = '${FOLDER_MIME_TYPE}' and trashed = false`,
+      fields: 'files(id)',
+      spaces: 'drive',
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true
+    });
+
+    if (!response.data.files?.length) {
+      const folderMetadata = {
+        name: part,
+        mimeType: FOLDER_MIME_TYPE,
+        parents: [currentFolderId]
+      };
+      const folder = await driveService.files.create({
+        requestBody: folderMetadata,
+        fields: 'id',
+        supportsAllDrives: true
+      });
+
+      if (!folder.data.id) {
+        throw new Error(`Failed to create intermediate folder: ${part}`);
+      }
+
+      currentFolderId = folder.data.id;
+    } else {
+      currentFolderId = response.data.files[0].id!;
+    }
+  }
+
+  return currentFolderId;
+}
+
+/**
+ * Account-aware version of resolveFolderId.
+ */
+async function resolveFolderIdFor(input: string | undefined, driveService: drive_v3.Drive): Promise<string> {
+  if (!input) return 'root';
+
+  if (input.startsWith('/')) {
+    return resolvePathFor(input, driveService);
+  } else {
+    return input;
+  }
+}
+
+/**
+ * Account-aware version of checkFileExists.
+ */
+async function checkFileExistsFor(name: string, parentFolderId: string = 'root', driveService: drive_v3.Drive): Promise<string | null> {
+  try {
+    const escapedName = name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    const query = `name = '${escapedName}' and '${parentFolderId}' in parents and trashed = false`;
+
+    const res = await driveService.files.list({
+      q: query,
+      fields: 'files(id, name, mimeType)',
+      pageSize: 1,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true
+    });
+
+    if (res.data.files && res.data.files.length > 0) {
+      return res.data.files[0].id || null;
+    }
+    return null;
+  } catch (error) {
+    log('Error checking file existence:', error);
+    return null;
+  }
+}
+
+// -----------------------------------------------------------------------------
 // INPUT VALIDATION SCHEMAS
 // -----------------------------------------------------------------------------
 const SearchSchema = z.object({
   query: z.string().min(1, "Search query is required"),
   pageSize: z.number().int().min(1).max(100).optional(),
-  pageToken: z.string().optional()
+  pageToken: z.string().optional(),
+  account: z.string().optional()
 });
 
 const CreateTextFileSchema = z.object({
@@ -336,7 +428,8 @@ const CopyFileSchema = z.object({
 const CreateGoogleDocSchema = z.object({
   name: z.string().min(1, "Document name is required"),
   content: z.string(),
-  parentFolderId: z.string().optional()
+  parentFolderId: z.string().optional(),
+  account: z.string().optional()
 });
 
 const UpdateGoogleDocSchema = z.object({
@@ -499,7 +592,8 @@ const FormatGoogleDocParagraphSchema = z.object({
 });
 
 const GetGoogleDocContentSchema = z.object({
-  documentId: z.string().min(1, "Document ID is required")
+  documentId: z.string().min(1, "Document ID is required"),
+  account: z.string().optional()
 });
 
 // Google Slides Formatting Schemas
@@ -1037,7 +1131,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             query: { type: "string", description: "Search query" },
             pageSize: { type: "number", description: "Results per page (default 50, max 100)" },
-            pageToken: { type: "string", description: "Token for next page of results" }
+            pageToken: { type: "string", description: "Token for next page of results" },
+            account: { type: "string", description: "Account alias or email (multi-account mode)" }
           },
           required: ["query"],
         },
@@ -1163,7 +1258,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             name: { type: "string", description: "Doc name" },
             content: { type: "string", description: "Doc content" },
-            parentFolderId: { type: "string", description: "Parent folder ID", optional: true }
+            parentFolderId: { type: "string", description: "Parent folder ID", optional: true },
+            account: { type: "string", description: "Account alias or email (multi-account mode)" }
           },
           required: ["name", "content"]
         }
@@ -1553,7 +1649,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            documentId: { type: "string", description: "Document ID" }
+            documentId: { type: "string", description: "Document ID" },
+            account: { type: "string", description: "Account alias or email (multi-account mode)" }
           },
           required: ["documentId"]
         }
@@ -2302,12 +2399,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!validation.success) {
           return errorResponse(validation.error.errors[0].message);
         }
-        const { query: userQuery, pageSize, pageToken } = validation.data;
+        const { query: userQuery, pageSize, pageToken, account: searchAccount } = validation.data;
+
+        // Use account-specific or legacy drive service
+        const searchServices = await accountManager.getServices(searchAccount);
+        const searchDrive = searchServices?.drive || drive;
 
         const escapedQuery = userQuery.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
         const formattedQuery = `fullText contains '${escapedQuery}' and trashed = false`;
 
-        const res = await drive.files.list({
+        const res = await searchDrive.files.list({
           q: formattedQuery,
           pageSize: Math.min(pageSize || 50, 100),
           pageToken: pageToken,
@@ -2323,6 +2424,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (res.data.nextPageToken) {
           response += `\n\nMore results available. Use pageToken: ${res.data.nextPageToken}`;
         }
+        response += accountManager.formatAccountSuffix(searchServices);
 
         return {
           content: [{ type: "text", text: response }],
@@ -2696,10 +2798,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const args = validation.data;
 
-        const parentFolderId = await resolveFolderId(args.parentFolderId);
+        // Use account-specific or legacy services
+        const createDocServices = await accountManager.getServices(args.account);
+        const createDocDrive = createDocServices?.drive || drive;
+        const createDocAuth = createDocServices?.authClient || authClient;
+
+        const parentFolderId = createDocServices
+          ? await resolveFolderIdFor(args.parentFolderId, createDocDrive)
+          : await resolveFolderId(args.parentFolderId);
 
         // Check if document already exists
-        const existingFileId = await checkFileExists(args.name, parentFolderId);
+        const existingFileId = createDocServices
+          ? await checkFileExistsFor(args.name, parentFolderId, createDocDrive)
+          : await checkFileExists(args.name, parentFolderId);
         if (existingFileId) {
           return errorResponse(
             `A document named "${args.name}" already exists in this location. ` +
@@ -2707,17 +2818,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           );
         }
 
-        log('Creating Google Doc', { 
-          authClientExists: !!authClient, 
+        log('Creating Google Doc', {
+          authClientExists: !!createDocAuth,
           parentFolderId,
-          authClientType: authClient?.constructor?.name,
-          accessToken: authClient?.credentials?.access_token ? 'present' : 'missing',
-          tokenLength: authClient?.credentials?.access_token?.length
+          authClientType: createDocAuth?.constructor?.name,
+          accessToken: createDocAuth?.credentials?.access_token ? 'present' : 'missing',
+          tokenLength: createDocAuth?.credentials?.access_token?.length
         });
 
         // Debug: Try to get current user to verify auth
         try {
-          const aboutResponse = await drive.about.get({ fields: 'user' });
+          const aboutResponse = await createDocDrive.about.get({ fields: 'user' });
           log('Auth verification - current user:', aboutResponse.data.user?.emailAddress);
         } catch (authError) {
           log('Auth verification failed:', authError instanceof Error ? authError.message : String(authError));
@@ -2726,7 +2837,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Create empty doc
         let docResponse;
         try {
-          docResponse = await drive.files.create({
+          docResponse = await createDocDrive.files.create({
             requestBody: {
               name: args.name,
               mimeType: 'application/vnd.google-apps.document',
@@ -2746,7 +2857,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const doc = docResponse.data;
 
-        const docs = google.docs({ version: 'v1', auth: authClient });
+        const docs = google.docs({ version: 'v1', auth: createDocAuth });
         await docs.documents.batchUpdate({
           documentId: doc.id!,
           requestBody: {
@@ -2771,8 +2882,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         });
 
+        const createDocResponseText = `Created Google Doc: ${doc.name}\nID: ${doc.id}\nLink: ${doc.webViewLink}` + accountManager.formatAccountSuffix(createDocServices);
+
         return {
-          content: [{ type: "text", text: `Created Google Doc: ${doc.name}\nID: ${doc.id}\nLink: ${doc.webViewLink}` }],
+          content: [{ type: "text", text: createDocResponseText }],
           isError: false
         };
       }
@@ -3799,13 +3912,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const args = validation.data;
 
-        const docs = google.docs({ version: 'v1', auth: authClient });
+        // Use account-specific or legacy auth
+        const docContentServices = await accountManager.getServices(args.account);
+        const docContentAuth = docContentServices?.authClient || authClient;
+
+        const docs = google.docs({ version: 'v1', auth: docContentAuth });
         const document = await docs.documents.get({ documentId: args.documentId });
-        
+
         let content = '';
         let currentIndex = 1;
         const segments: Array<{text: string, startIndex: number, endIndex: number}> = [];
-        
+
         // Extract text content with indices
         if (document.data.body?.content) {
           for (const element of document.data.body.content) {
@@ -3825,12 +3942,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
           }
         }
-        
+
         // Format the response to show text with indices
         let formattedContent = 'Document content with indices:\n\n';
         let lineStart = 1;
         const lines = content.split('\n');
-        
+
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
           const lineEnd = lineStart + line.length;
@@ -3839,11 +3956,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
           lineStart = lineEnd + 1; // +1 for the newline character
         }
-        
+
+        const docContentResponseText = formattedContent + `\nTotal length: ${content.length} characters` + accountManager.formatAccountSuffix(docContentServices);
+
         return {
           content: [{
             type: "text",
-            text: formattedContent + `\nTotal length: ${content.length} characters`
+            text: docContentResponseText
           }],
           isError: false
         };
@@ -5987,19 +6106,26 @@ async function runAuthServer(): Promise<void> {
 // MAIN EXECUTION
 // -----------------------------------------------------------------------------
 
-function parseCliArgs(): { command: string | undefined } {
+function parseCliArgs(): { command: string | undefined; account: string | undefined } {
   const args = process.argv.slice(2);
   let command: string | undefined;
+  let account: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    
+
     // Handle special version/help flags as commands
     if (arg === '--version' || arg === '-v' || arg === '--help' || arg === '-h') {
       command = arg;
       continue;
     }
-    
+
+    // Handle --account flag
+    if (arg === '--account' && i + 1 < args.length) {
+      account = args[++i];
+      continue;
+    }
+
     // Check for command (first non-option argument)
     if (!command && !arg.startsWith('--')) {
       command = arg;
@@ -6007,15 +6133,27 @@ function parseCliArgs(): { command: string | undefined } {
     }
   }
 
-  return { command };
+  return { command, account };
 }
 
 async function main() {
-  const { command } = parseCliArgs();
+  const { command, account } = parseCliArgs();
 
   switch (command) {
     case "auth":
-      await runAuthServer();
+      if (account) {
+        // Multi-account auth: authenticate a specific account
+        try {
+          console.error(`Authenticating account: ${account}`);
+          await authenticateAccount(account);
+          process.exit(0);
+        } catch (error) {
+          console.error('Account authentication failed:', error);
+          process.exit(1);
+        }
+      } else {
+        await runAuthServer();
+      }
       break;
     case "start":
     case undefined:
