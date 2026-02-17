@@ -667,6 +667,30 @@ const InsertFileChipSchema = z.object({
   atEnd: z.boolean().optional()
 });
 
+// Google Sheets tab management schemas
+const AddSheetSchema = z.object({
+  spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
+  title: z.string().min(1, "Sheet tab title is required"),
+  index: z.number().int().min(0).optional(),
+  rowCount: z.number().int().min(1).optional(),
+  columnCount: z.number().int().min(1).optional()
+});
+
+const ListSheetsSchema = z.object({
+  spreadsheetId: z.string().min(1, "Spreadsheet ID is required")
+});
+
+const DeleteSheetSchema = z.object({
+  spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
+  sheetId: z.number().int({ message: "Sheet ID must be a number (use listSheets to find IDs)" })
+});
+
+const RenameSheetSchema = z.object({
+  spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
+  sheetId: z.number().int({ message: "Sheet ID must be a number (use listSheets to find IDs)" }),
+  newTitle: z.string().min(1, "New title is required")
+});
+
 // Google Sheets extended schemas
 const AddDataValidationSchema = z.object({
   spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
@@ -1817,6 +1841,58 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             matchCase: { type: "boolean", description: "Match case (default: false)" }
           },
           required: ["presentationId", "findText", "replaceText"]
+        }
+      },
+      // --- Google Sheets tab management tools ---
+      {
+        name: "addSheet",
+        description: "Add a new sheet tab to a Google Spreadsheet",
+        inputSchema: {
+          type: "object",
+          properties: {
+            spreadsheetId: { type: "string", description: "Spreadsheet ID" },
+            title: { type: "string", description: "Title for the new sheet tab" },
+            index: { type: "number", description: "Position to insert the tab (0-based, optional)" },
+            rowCount: { type: "number", description: "Number of rows (default: 1000)" },
+            columnCount: { type: "number", description: "Number of columns (default: 26)" }
+          },
+          required: ["spreadsheetId", "title"]
+        }
+      },
+      {
+        name: "listSheets",
+        description: "List all sheet tabs in a Google Spreadsheet with their IDs, titles, and dimensions",
+        inputSchema: {
+          type: "object",
+          properties: {
+            spreadsheetId: { type: "string", description: "Spreadsheet ID" }
+          },
+          required: ["spreadsheetId"]
+        }
+      },
+      {
+        name: "deleteSheet",
+        description: "Delete a sheet tab from a Google Spreadsheet by its sheet ID (use listSheets to find IDs)",
+        inputSchema: {
+          type: "object",
+          properties: {
+            spreadsheetId: { type: "string", description: "Spreadsheet ID" },
+            sheetId: { type: "number", description: "Sheet ID (numeric, use listSheets to find)" }
+          },
+          required: ["spreadsheetId", "sheetId"]
+        }
+      },
+      {
+        name: "renameSheet",
+        description: "Rename a sheet tab in a Google Spreadsheet",
+        inputSchema: {
+          type: "object",
+          properties: {
+            spreadsheetId: { type: "string", description: "Spreadsheet ID" },
+            sheetId: { type: "number", description: "Sheet ID (numeric, use listSheets to find)" },
+            newTitle: { type: "string", description: "New title for the sheet tab" }
+          },
+          required: ["spreadsheetId", "sheetId", "newTitle"]
         }
       },
       // --- Google Sheets extended tools ---
@@ -5180,6 +5256,126 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{
             type: "text",
             text: `Found ${chips.length} smart chip(s) in document ${args.documentId}:\n\n${lines.join('\n')}\n\nRaw data:\n${JSON.stringify(chips, null, 2)}`
+          }],
+          isError: false
+        };
+      }
+
+      case "addSheet": {
+        const validation = AddSheetSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const sheets = google.sheets({ version: 'v4', auth: authClient });
+
+        const properties: any = { title: args.title };
+        if (args.index !== undefined) properties.index = args.index;
+        if (args.rowCount) properties.gridProperties = { ...properties.gridProperties, rowCount: args.rowCount };
+        if (args.columnCount) properties.gridProperties = { ...properties.gridProperties, columnCount: args.columnCount };
+
+        const response = await sheets.spreadsheets.batchUpdate({
+          spreadsheetId: args.spreadsheetId,
+          requestBody: {
+            requests: [{ addSheet: { properties } }]
+          }
+        });
+
+        const newSheet = response.data.replies?.[0]?.addSheet?.properties;
+
+        return {
+          content: [{
+            type: "text",
+            text: `Added sheet tab "${newSheet?.title}" (ID: ${newSheet?.sheetId}) to spreadsheet ${args.spreadsheetId}`
+          }],
+          isError: false
+        };
+      }
+
+      case "listSheets": {
+        const validation = ListSheetsSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const sheets = google.sheets({ version: 'v4', auth: authClient });
+
+        const response = await sheets.spreadsheets.get({
+          spreadsheetId: args.spreadsheetId,
+          fields: 'sheets(properties(sheetId,title,index,sheetType,gridProperties(rowCount,columnCount)),data(rowData))'
+        });
+
+        const sheetList = response.data.sheets || [];
+        const lines = sheetList.map((s: any) => {
+          const p = s.properties;
+          const grid = p?.gridProperties;
+          return `  [${p?.index}] "${p?.title}" (ID: ${p?.sheetId}) | Type: ${p?.sheetType || 'GRID'} | ${grid?.rowCount || '?'} rows x ${grid?.columnCount || '?'} cols`;
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Found ${sheetList.length} sheet tab(s) in spreadsheet ${args.spreadsheetId}:\n\n${lines.join('\n')}`
+          }],
+          isError: false
+        };
+      }
+
+      case "deleteSheet": {
+        const validation = DeleteSheetSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const sheets = google.sheets({ version: 'v4', auth: authClient });
+
+        await sheets.spreadsheets.batchUpdate({
+          spreadsheetId: args.spreadsheetId,
+          requestBody: {
+            requests: [{ deleteSheet: { sheetId: args.sheetId } }]
+          }
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Deleted sheet tab with ID ${args.sheetId} from spreadsheet ${args.spreadsheetId}`
+          }],
+          isError: false
+        };
+      }
+
+      case "renameSheet": {
+        const validation = RenameSheetSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const sheets = google.sheets({ version: 'v4', auth: authClient });
+
+        await sheets.spreadsheets.batchUpdate({
+          spreadsheetId: args.spreadsheetId,
+          requestBody: {
+            requests: [{
+              updateSheetProperties: {
+                properties: {
+                  sheetId: args.sheetId,
+                  title: args.newTitle
+                },
+                fields: 'title'
+              }
+            }]
+          }
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Renamed sheet tab ${args.sheetId} to "${args.newTitle}" in spreadsheet ${args.spreadsheetId}`
           }],
           isError: false
         };
