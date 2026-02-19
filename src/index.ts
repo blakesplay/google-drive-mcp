@@ -954,6 +954,44 @@ const DeleteTaskSchema = z.object({
   taskId: z.string().min(1, "Task ID is required")
 });
 
+// Gmail Schemas
+const SendEmailSchema = z.object({
+  to: z.string().min(1, "Recipient email is required"),
+  subject: z.string().min(1, "Subject is required"),
+  body: z.string().min(1, "Email body is required"),
+  isHtml: z.boolean().optional(),
+  cc: z.string().optional(),
+  bcc: z.string().optional(),
+  account: z.string().optional()
+});
+
+const ListEmailsSchema = z.object({
+  query: z.string().optional(),
+  maxResults: z.number().int().min(1).max(100).optional(),
+  labelIds: z.array(z.string()).optional(),
+  pageToken: z.string().optional(),
+  account: z.string().optional()
+});
+
+const GetEmailSchema = z.object({
+  messageId: z.string().min(1, "Message ID is required"),
+  account: z.string().optional()
+});
+
+const SearchEmailsSchema = z.object({
+  query: z.string().min(1, "Search query is required"),
+  maxResults: z.number().int().min(1).max(100).optional(),
+  pageToken: z.string().optional(),
+  account: z.string().optional()
+});
+
+const ReplyToEmailSchema = z.object({
+  messageId: z.string().min(1, "Message ID is required"),
+  body: z.string().min(1, "Reply body is required"),
+  isHtml: z.boolean().optional(),
+  account: z.string().optional()
+});
+
 // -----------------------------------------------------------------------------
 // SERVER SETUP
 // -----------------------------------------------------------------------------
@@ -2370,6 +2408,77 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             taskId: { type: "string", description: "ID of the task to delete" }
           },
           required: ["taskId"]
+        }
+      },
+      {
+        name: "sendEmail",
+        description: "Send an email via Gmail",
+        inputSchema: {
+          type: "object",
+          properties: {
+            to: { type: "string", description: "Recipient email address(es), comma-separated for multiple" },
+            subject: { type: "string", description: "Email subject" },
+            body: { type: "string", description: "Email body (plain text or HTML)" },
+            isHtml: { type: "boolean", description: "Whether the body is HTML (default: false)" },
+            cc: { type: "string", description: "CC recipients, comma-separated" },
+            bcc: { type: "string", description: "BCC recipients, comma-separated" },
+            account: { type: "string", description: "Account alias or email (multi-account mode)" }
+          },
+          required: ["to", "subject", "body"]
+        }
+      },
+      {
+        name: "listEmails",
+        description: "List emails from Gmail inbox with optional filtering",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Gmail search query (e.g. 'is:unread', 'from:user@example.com')" },
+            maxResults: { type: "number", description: "Maximum number of results (default 10, max 100)" },
+            labelIds: { type: "array", items: { type: "string" }, description: "Filter by label IDs (e.g. ['INBOX', 'UNREAD'])" },
+            pageToken: { type: "string", description: "Token for next page of results" },
+            account: { type: "string", description: "Account alias or email (multi-account mode)" }
+          }
+        }
+      },
+      {
+        name: "getEmail",
+        description: "Get the full content of a specific email by message ID",
+        inputSchema: {
+          type: "object",
+          properties: {
+            messageId: { type: "string", description: "Gmail message ID" },
+            account: { type: "string", description: "Account alias or email (multi-account mode)" }
+          },
+          required: ["messageId"]
+        }
+      },
+      {
+        name: "searchEmails",
+        description: "Search emails using Gmail search query syntax",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Gmail search query (supports Gmail syntax: from:, to:, subject:, has:attachment, before:, after:, etc.)" },
+            maxResults: { type: "number", description: "Maximum number of results (default 10, max 100)" },
+            pageToken: { type: "string", description: "Token for next page of results" },
+            account: { type: "string", description: "Account alias or email (multi-account mode)" }
+          },
+          required: ["query"]
+        }
+      },
+      {
+        name: "replyToEmail",
+        description: "Reply to an existing email thread",
+        inputSchema: {
+          type: "object",
+          properties: {
+            messageId: { type: "string", description: "Message ID of the email to reply to" },
+            body: { type: "string", description: "Reply body (plain text or HTML)" },
+            isHtml: { type: "boolean", description: "Whether the body is HTML (default: false)" },
+            account: { type: "string", description: "Account alias or email (multi-account mode)" }
+          },
+          required: ["messageId", "body"]
         }
       }
     ]
@@ -6013,6 +6122,316 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             type: "text",
             text: `Replaced ${occurrences} occurrence(s) of "${args.findText}" with "${args.replaceText}" in document ${args.documentId}`
           }],
+          isError: false
+        };
+      }
+
+      // -----------------------------------------------------------------------
+      // GMAIL TOOLS
+      // -----------------------------------------------------------------------
+
+      case "sendEmail": {
+        const validation = SendEmailSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const sendServices = await accountManager.getServices(args.account);
+        const sendAuth = sendServices?.authClient || authClient;
+        const gmail = google.gmail({ version: 'v1', auth: sendAuth });
+
+        const contentType = args.isHtml ? 'text/html' : 'text/plain';
+        const messageParts = [
+          `To: ${args.to}`,
+          `Subject: ${args.subject}`,
+          `Content-Type: ${contentType}; charset=utf-8`,
+          'MIME-Version: 1.0',
+        ];
+        if (args.cc) messageParts.splice(1, 0, `Cc: ${args.cc}`);
+        if (args.bcc) messageParts.splice(1, 0, `Bcc: ${args.bcc}`);
+        messageParts.push('', args.body);
+
+        const rawMessage = Buffer.from(messageParts.join('\r\n'))
+          .toString('base64')
+          .replace(/\+/g, '-')
+          .replace(/\//g, '_')
+          .replace(/=+$/, '');
+
+        const res = await gmail.users.messages.send({
+          userId: 'me',
+          requestBody: { raw: rawMessage }
+        });
+
+        log('Email sent', { messageId: res.data.id, to: args.to });
+
+        let sendResponse = `Email sent successfully!\nMessage ID: ${res.data.id}\nTo: ${args.to}`;
+        if (args.cc) sendResponse += `\nCc: ${args.cc}`;
+        sendResponse += accountManager.formatAccountSuffix(sendServices);
+
+        return {
+          content: [{ type: "text", text: sendResponse }],
+          isError: false
+        };
+      }
+
+      case "listEmails": {
+        const validation = ListEmailsSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const listServices = await accountManager.getServices(args.account);
+        const listAuth = listServices?.authClient || authClient;
+        const gmail = google.gmail({ version: 'v1', auth: listAuth });
+
+        const listParams: any = {
+          userId: 'me',
+          maxResults: Math.min(args.maxResults || 10, 100),
+        };
+        if (args.query) listParams.q = args.query;
+        if (args.labelIds) listParams.labelIds = args.labelIds;
+        if (args.pageToken) listParams.pageToken = args.pageToken;
+
+        const listRes = await gmail.users.messages.list(listParams);
+        const messages = listRes.data.messages || [];
+
+        if (messages.length === 0) {
+          let emptyResponse = 'No emails found.';
+          emptyResponse += accountManager.formatAccountSuffix(listServices);
+          return {
+            content: [{ type: "text", text: emptyResponse }],
+            isError: false
+          };
+        }
+
+        // Fetch headers for each message
+        const emailSummaries: string[] = [];
+        for (const msg of messages) {
+          const detail = await gmail.users.messages.get({
+            userId: 'me',
+            id: msg.id!,
+            format: 'metadata',
+            metadataHeaders: ['From', 'Subject', 'Date']
+          });
+          const headers = detail.data.payload?.headers || [];
+          const from = headers.find(h => h.name === 'From')?.value || 'Unknown';
+          const subject = headers.find(h => h.name === 'Subject')?.value || '(no subject)';
+          const date = headers.find(h => h.name === 'Date')?.value || '';
+          const snippet = detail.data.snippet || '';
+          emailSummaries.push(`ID: ${msg.id}\nFrom: ${from}\nSubject: ${subject}\nDate: ${date}\nSnippet: ${snippet}`);
+        }
+
+        let listResponse = `Found ${messages.length} emails:\n\n${emailSummaries.join('\n\n---\n\n')}`;
+        if (listRes.data.nextPageToken) {
+          listResponse += `\n\nMore results available. Use pageToken: ${listRes.data.nextPageToken}`;
+        }
+        listResponse += accountManager.formatAccountSuffix(listServices);
+
+        return {
+          content: [{ type: "text", text: listResponse }],
+          isError: false
+        };
+      }
+
+      case "getEmail": {
+        const validation = GetEmailSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const getServices = await accountManager.getServices(args.account);
+        const getAuth = getServices?.authClient || authClient;
+        const gmail = google.gmail({ version: 'v1', auth: getAuth });
+
+        const message = await gmail.users.messages.get({
+          userId: 'me',
+          id: args.messageId,
+          format: 'full'
+        });
+
+        const headers = message.data.payload?.headers || [];
+        const from = headers.find(h => h.name === 'From')?.value || 'Unknown';
+        const to = headers.find(h => h.name === 'To')?.value || 'Unknown';
+        const subject = headers.find(h => h.name === 'Subject')?.value || '(no subject)';
+        const date = headers.find(h => h.name === 'Date')?.value || '';
+        const cc = headers.find(h => h.name === 'Cc')?.value;
+
+        // Extract body - check for multipart or simple
+        let body = '';
+        const payload = message.data.payload;
+        if (payload?.parts) {
+          // Multipart message - prefer text/plain, fallback to text/html
+          const textPart = payload.parts.find(p => p.mimeType === 'text/plain')
+            || payload.parts.find(p => p.mimeType === 'text/html');
+          if (textPart?.body?.data) {
+            body = Buffer.from(textPart.body.data, 'base64').toString('utf-8');
+          }
+          // Check nested parts (e.g. multipart/alternative inside multipart/mixed)
+          if (!body) {
+            for (const part of payload.parts) {
+              if (part.parts) {
+                const nested = part.parts.find(p => p.mimeType === 'text/plain')
+                  || part.parts.find(p => p.mimeType === 'text/html');
+                if (nested?.body?.data) {
+                  body = Buffer.from(nested.body.data, 'base64').toString('utf-8');
+                  break;
+                }
+              }
+            }
+          }
+        } else if (payload?.body?.data) {
+          body = Buffer.from(payload.body.data, 'base64').toString('utf-8');
+        }
+
+        // List attachments
+        const attachments: string[] = [];
+        if (payload?.parts) {
+          for (const part of payload.parts) {
+            if (part.filename && part.filename.length > 0) {
+              attachments.push(`${part.filename} (${part.mimeType}, ${part.body?.size || 0} bytes)`);
+            }
+          }
+        }
+
+        let getResponse = `From: ${from}\nTo: ${to}\nSubject: ${subject}\nDate: ${date}`;
+        if (cc) getResponse += `\nCc: ${cc}`;
+        getResponse += `\nThread ID: ${message.data.threadId}`;
+        getResponse += `\nLabels: ${message.data.labelIds?.join(', ') || 'none'}`;
+        if (attachments.length > 0) {
+          getResponse += `\nAttachments: ${attachments.join(', ')}`;
+        }
+        getResponse += `\n\n--- Body ---\n${body || '(empty body)'}`;
+        getResponse += accountManager.formatAccountSuffix(getServices);
+
+        return {
+          content: [{ type: "text", text: getResponse }],
+          isError: false
+        };
+      }
+
+      case "searchEmails": {
+        const validation = SearchEmailsSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const searchServices = await accountManager.getServices(args.account);
+        const searchAuth = searchServices?.authClient || authClient;
+        const gmail = google.gmail({ version: 'v1', auth: searchAuth });
+
+        const searchRes = await gmail.users.messages.list({
+          userId: 'me',
+          q: args.query,
+          maxResults: Math.min(args.maxResults || 10, 100),
+          pageToken: args.pageToken || undefined
+        });
+
+        const messages = searchRes.data.messages || [];
+
+        if (messages.length === 0) {
+          let emptyResponse = `No emails found for query: "${args.query}"`;
+          emptyResponse += accountManager.formatAccountSuffix(searchServices);
+          return {
+            content: [{ type: "text", text: emptyResponse }],
+            isError: false
+          };
+        }
+
+        // Fetch headers for each message
+        const emailSummaries: string[] = [];
+        for (const msg of messages) {
+          const detail = await gmail.users.messages.get({
+            userId: 'me',
+            id: msg.id!,
+            format: 'metadata',
+            metadataHeaders: ['From', 'Subject', 'Date']
+          });
+          const headers = detail.data.payload?.headers || [];
+          const from = headers.find(h => h.name === 'From')?.value || 'Unknown';
+          const subject = headers.find(h => h.name === 'Subject')?.value || '(no subject)';
+          const date = headers.find(h => h.name === 'Date')?.value || '';
+          const snippet = detail.data.snippet || '';
+          emailSummaries.push(`ID: ${msg.id}\nFrom: ${from}\nSubject: ${subject}\nDate: ${date}\nSnippet: ${snippet}`);
+        }
+
+        let searchResponse = `Found ${messages.length} emails for query "${args.query}":\n\n${emailSummaries.join('\n\n---\n\n')}`;
+        if (searchRes.data.nextPageToken) {
+          searchResponse += `\n\nMore results available. Use pageToken: ${searchRes.data.nextPageToken}`;
+        }
+        searchResponse += accountManager.formatAccountSuffix(searchServices);
+
+        return {
+          content: [{ type: "text", text: searchResponse }],
+          isError: false
+        };
+      }
+
+      case "replyToEmail": {
+        const validation = ReplyToEmailSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        const replyServices = await accountManager.getServices(args.account);
+        const replyAuth = replyServices?.authClient || authClient;
+        const gmail = google.gmail({ version: 'v1', auth: replyAuth });
+
+        // Get the original message to extract headers for reply
+        const original = await gmail.users.messages.get({
+          userId: 'me',
+          id: args.messageId,
+          format: 'metadata',
+          metadataHeaders: ['From', 'To', 'Subject', 'Message-ID', 'References', 'In-Reply-To']
+        });
+
+        const headers = original.data.payload?.headers || [];
+        const originalFrom = headers.find(h => h.name === 'From')?.value || '';
+        const originalSubject = headers.find(h => h.name === 'Subject')?.value || '';
+        const messageId = headers.find(h => h.name === 'Message-ID')?.value || '';
+        const references = headers.find(h => h.name === 'References')?.value || '';
+        const threadId = original.data.threadId;
+
+        // Build reply subject
+        const replySubject = originalSubject.startsWith('Re:') ? originalSubject : `Re: ${originalSubject}`;
+
+        const contentType = args.isHtml ? 'text/html' : 'text/plain';
+        const messageParts = [
+          `To: ${originalFrom}`,
+          `Subject: ${replySubject}`,
+          `Content-Type: ${contentType}; charset=utf-8`,
+          'MIME-Version: 1.0',
+          `In-Reply-To: ${messageId}`,
+          `References: ${references ? references + ' ' : ''}${messageId}`,
+          '',
+          args.body
+        ];
+
+        const rawMessage = Buffer.from(messageParts.join('\r\n'))
+          .toString('base64')
+          .replace(/\+/g, '-')
+          .replace(/\//g, '_')
+          .replace(/=+$/, '');
+
+        const res = await gmail.users.messages.send({
+          userId: 'me',
+          requestBody: {
+            raw: rawMessage,
+            threadId: threadId || undefined
+          }
+        });
+
+        log('Reply sent', { messageId: res.data.id, replyTo: args.messageId });
+
+        let replyResponse = `Reply sent successfully!\nMessage ID: ${res.data.id}\nIn reply to: ${originalFrom}\nSubject: ${replySubject}`;
+        replyResponse += accountManager.formatAccountSuffix(replyServices);
+
+        return {
+          content: [{ type: "text", text: replyResponse }],
           isError: false
         };
       }
